@@ -73,5 +73,6 @@ export async function runTranslatePipeline({ audioBlob, sourceLang, targetLang, 
     pivotText,       // English intermediate (shown as secondary transcript)
     translatedText,  // Final translated text (shown prominently)
     detectedLang: sttResult.detectedLanguage,
+    audioB64,
   };
 }

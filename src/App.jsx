@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { runTranslatePipeline } from './pipeline.js';
+import { playBase64Audio } from './api/sarvam.js';
 
 // ─── Language pairs ───────────────────────────────────────────────────────────
 const LANGUAGE_PAIRS = [
@@ -121,6 +122,7 @@ export default function App() {
           targetLabel: speaker === 'a' ? `${pair.labelB} (${pair.subB})` : `${pair.labelA} (${pair.subA})`,
           pivotText: result.pivotText,
           translatedText: result.translatedText,
+          audioB64: result.audioB64,
           sourceLang,
           targetLang,
         },
@@ -275,13 +277,47 @@ function SpeakerButton({ label, sub, color, isRecording, disabled, onStart, onSt
 function MessageBubble({ msg }) {
   const isA = msg.speaker === 'a';
   const accentColor = isA ? COLORS.amber : COLORS.teal;
+  const [replaying, setReplaying] = useState(false);
+
+  const handleReplay = async () => {
+    if (!msg.audioB64 || replaying) return;
+    setReplaying(true);
+    try {
+      await playBase64Audio(msg.audioB64);
+    } catch {}
+    setReplaying(false);
+  };
 
   return (
     <div style={{ ...s.bubble, alignSelf: isA ? 'flex-start' : 'flex-end', animationDelay: '0s' }}>
-      {/* Speaker tag */}
-      <div style={{ ...s.bubbleSpeaker, color: accentColor }}>
-        {msg.sourceLabel}
-        <span style={s.arrowTag}> → {msg.targetLabel}</span>
+      {/* Speaker tag + replay */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div style={{ ...s.bubbleSpeaker, color: accentColor, marginBottom: 0 }}>
+          {msg.sourceLabel}
+          <span style={s.arrowTag}> → {msg.targetLabel}</span>
+        </div>
+        {msg.audioB64 && (
+          <button
+            onClick={handleReplay}
+            disabled={replaying}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              background: 'transparent',
+              border: `1px solid ${accentColor}`,
+              borderRadius: 16,
+              padding: '3px 10px',
+              cursor: replaying ? 'default' : 'pointer',
+              color: replaying ? COLORS.muted : accentColor,
+              fontSize: '0.72rem',
+              fontFamily: "'DM Sans', sans-serif",
+              flexShrink: 0,
+            }}
+          >
+            {replaying ? '⏳ Playing…' : '🔊 Replay'}
+          </button>
+        )}
       </div>
 
       {/* English pivot (intermediate) */}
