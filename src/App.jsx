@@ -295,12 +295,24 @@ function MessageBubble({ msg }) {
         </div>
         {msg.audioB64 && (
           <button
-            style={{ ...s.replayBtn, color: accentColor, opacity: replaying ? 0.5 : 1 }}
             onClick={handleReplay}
             disabled={replaying}
-            title="Replay"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              background: 'transparent',
+              border: `1px solid ${accentColor}`,
+              borderRadius: 16,
+              padding: '3px 10px',
+              cursor: replaying ? 'default' : 'pointer',
+              color: replaying ? COLORS.muted : accentColor,
+              fontSize: '0.72rem',
+              fontFamily: "'DM Sans', sans-serif",
+              flexShrink: 0,
+            }}
           >
-            {replaying ? '▶️' : '🔁'}
+            {replaying ? '⏳ Playing…' : '🔊 Replay'}
           </button>
         )}
       </div>
@@ -472,14 +484,6 @@ const s = {
     borderBottom: `1px solid ${COLORS.border}`,
   },
   pivotLabel: { fontStyle: 'normal', fontWeight: 600 },
-  replayBtn: {
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: '0.9rem',
-    padding: '2px 4px',
-    flexShrink: 0,
-  },
   bubbleMain: {
     fontSize: '1rem',
     lineHeight: 1.55,
