@@ -70,8 +70,9 @@ export async function runTranslatePipeline({ audioBlob, sourceLang, targetLang, 
   onStep('done', '');
 
   return {
-    pivotText,       // English intermediate (shown as secondary transcript)
-    translatedText,  // Final translated text (shown prominently)
+    pivotText,
+    translatedText,
+    audioB64,
     detectedLang: sttResult.detectedLanguage,
   };
 }

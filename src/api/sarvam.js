@@ -10,7 +10,7 @@
  * In prod, swap BASE to 'https://api.sarvam.ai' or route through your own proxy.
  */
 
-const BASE = import.meta.env.DEV ? '/sarvam' : 'https://api.sarvam.ai';
+const BASE = import.meta.env.DEV ? '/sarvam' : '/api';
 
 // ─── Speech to Text ──────────────────────────────────────────────────────────
 // mode: 'transcribe' → returns original language text

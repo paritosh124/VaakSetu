@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { runTranslatePipeline } from './pipeline.js';
+import { playBase64Audio } from './api/sarvam.js';
 
 // ─── Language pairs ───────────────────────────────────────────────────────────
 const LANGUAGE_PAIRS = [
@@ -27,9 +28,10 @@ const STEP_ICONS = { stt: '🎤', translate: '🔄', tts: '🔊', playing: '▶�
 
 // ─── Root App ────────────────────────────────────────────────────────────────
 export default function App() {
-  const storedKey = typeof localStorage !== 'undefined' ? localStorage.getItem('sarvam_key') || '' : '';
-  const [apiKey, setApiKey] = useState(import.meta.env.VITE_SARVAM_API_KEY || storedKey);
-  const [showSetup, setShowSetup] = useState(!apiKey);
+  const isProd = import.meta.env.PROD;
+  const storedKey = !isProd && typeof localStorage !== 'undefined' ? localStorage.getItem('sarvam_key') || '' : '';
+  const [apiKey, setApiKey] = useState(isProd ? '' : (import.meta.env.VITE_SARVAM_API_KEY || storedKey));
+  const [showSetup, setShowSetup] = useState(!isProd && !apiKey);
 
   const [pair, setPair] = useState(LANGUAGE_PAIRS[0]);
   const [recording, setRecording] = useState(null); // 'a' | 'b' | null
@@ -121,6 +123,7 @@ export default function App() {
           targetLabel: speaker === 'a' ? `${pair.labelB} (${pair.subB})` : `${pair.labelA} (${pair.subA})`,
           pivotText: result.pivotText,
           translatedText: result.translatedText,
+          audioB64: result.audioB64,
           sourceLang,
           targetLang,
         },
@@ -162,7 +165,7 @@ export default function App() {
           ))}
         </div>
 
-        <button style={s.gearBtn} title="Settings" onClick={() => setShowSetup(true)}>⚙</button>
+        {!isProd && <button style={s.gearBtn} title="Settings" onClick={() => setShowSetup(true)}>⚙</button>}
       </header>
 
       {/* ── Conversation ── */}
@@ -275,23 +278,39 @@ function SpeakerButton({ label, sub, color, isRecording, disabled, onStart, onSt
 function MessageBubble({ msg }) {
   const isA = msg.speaker === 'a';
   const accentColor = isA ? COLORS.amber : COLORS.teal;
+  const [replaying, setReplaying] = useState(false);
+
+  const handleReplay = async () => {
+    if (!msg.audioB64 || replaying) return;
+    setReplaying(true);
+    try { await playBase64Audio(msg.audioB64); } finally { setReplaying(false); }
+  };
 
   return (
     <div style={{ ...s.bubble, alignSelf: isA ? 'flex-start' : 'flex-end', animationDelay: '0s' }}>
-      {/* Speaker tag */}
-      <div style={{ ...s.bubbleSpeaker, color: accentColor }}>
-        {msg.sourceLabel}
-        <span style={s.arrowTag}> → {msg.targetLabel}</span>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <div style={{ ...s.bubbleSpeaker, color: accentColor, marginBottom: 0 }}>
+          {msg.sourceLabel}
+          <span style={s.arrowTag}> → {msg.targetLabel}</span>
+        </div>
+        {msg.audioB64 && (
+          <button
+            style={{ ...s.replayBtn, color: accentColor, opacity: replaying ? 0.5 : 1 }}
+            onClick={handleReplay}
+            disabled={replaying}
+            title="Replay"
+          >
+            {replaying ? '▶️' : '🔁'}
+          </button>
+        )}
       </div>
 
-      {/* English pivot (intermediate) */}
       {msg.pivotText && msg.sourceLang !== 'en-IN' && (
         <div style={s.bubblePivot}>
           <span style={s.pivotLabel}>English: </span>{msg.pivotText}
         </div>
       )}
 
-      {/* Final translation */}
       <div style={s.bubbleMain}>{msg.translatedText}</div>
     </div>
   );
@@ -453,6 +472,14 @@ const s = {
     borderBottom: `1px solid ${COLORS.border}`,
   },
   pivotLabel: { fontStyle: 'normal', fontWeight: 600 },
+  replayBtn: {
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    fontSize: '0.9rem',
+    padding: '2px 4px',
+    flexShrink: 0,
+  },
   bubbleMain: {
     fontSize: '1rem',
     lineHeight: 1.55,
