@@ -1,114 +1,108 @@
-# 🌐 VaakSetu — Bidirectional Voice Translator
+# VaakSetu — Bidirectional Voice Translator
 
-**Speech → Translation → Speech** for Indian languages, powered by [Sarvam AI](https://sarvam.ai).
+**वाक् + सेतु = Voice Bridge**
 
-## Supported Language Pairs (MVP)
+Real-time bidirectional voice translation for Indian languages. Two people who speak different languages share one device, take turns holding a button to speak, and hear the translation spoken aloud.
+
+**Live app:** [https://vaak-setu.vercel.app](https://vaak-setu.vercel.app)
+
+---
+
+## Supported Languages
+
 | Pair | Direction |
 |------|-----------|
 | Hindi ↔ Telugu | Bidirectional |
+| Hindi ↔ Gujarati | Bidirectional |
+| Hindi ↔ Punjabi | Bidirectional |
+| Hindi ↔ Kannada | Bidirectional |
+| Hindi ↔ Marathi | Bidirectional |
+| Hindi ↔ Tamil | Bidirectional |
+| Hindi ↔ Bengali | Bidirectional |
+| Hindi ↔ Malayalam | Bidirectional |
 | English ↔ Telugu | Bidirectional |
 
 ---
 
-## ⚡ Quick Start (Local Dev)
+## How to Use
+
+1. Open [https://vaak-setu.vercel.app](https://vaak-setu.vercel.app) on any device
+2. Select the language pair from the dropdown (e.g. Hindi ↔ Tamil)
+3. **Person A** holds their button and speaks in their language, then releases
+4. The translation plays aloud in the other person's language
+5. **Person B** does the same in their language
+6. Tap **Replay** on any message bubble to hear the translation again
+
+> Works on desktop and Android Chrome. iOS Safari requires microphone permission enabled under Settings → Privacy & Security → Microphone → Safari.
+
+---
+
+## How It Works
+
+All translations route through English as a pivot language (Sarvam's Mayura model only supports English ↔ Indian language pairs):
+
+```
+Indian language speech → Saaras v3 (STT + translate to English)
+                       → Mayura (English → target language)
+                       → Bulbul v3 (Text to Speech)
+                       → Plays audio
+```
+
+**Typical latency:** 2–3 seconds end-to-end.
+
+---
+
+## Tech Stack
+
+- **React + Vite** — frontend
+- **Vercel** — hosting + serverless API proxy
+- **Sarvam AI** — all three models:
+  - `saaras:v3` — Speech to Text
+  - `mayura:v1` — Translation
+  - `bulbul:v3` — Text to Speech
+
+---
+
+## Local Development
 
 ```bash
-# 1. Install dependencies
+# 1. Clone and install
+git clone https://github.com/your-username/VaakSetu.git
+cd VaakSetu
 npm install
 
 # 2. Add your Sarvam API key
-cp .env.example .env
-# → Edit .env and paste your key: VITE_SARVAM_API_KEY=sk_...
+echo "VITE_SARVAM_API_KEY=your_key_here" > .env
 
-# 3. Run
+# 3. Start dev server
 npm run dev
 # Open http://localhost:5173
 ```
 
-**Note:** During `npm run dev`, the Vite proxy routes all `/sarvam/*` requests to `https://api.sarvam.ai` — this avoids CORS issues in development.
+Get a Sarvam API key at [dashboard.sarvam.ai](https://dashboard.sarvam.ai).
 
 ---
 
-## 🚀 Deploy to Vercel
+## Deploying Your Own Instance
 
 ```bash
-npm run build
-# Push to GitHub, then import repo in Vercel dashboard
-# Add VITE_SARVAM_API_KEY as an Environment Variable in Vercel
-```
+npm install -g vercel
+vercel login
+vercel --prod
 
-> ⚠️ **CORS on Vercel:** In production, the Vite proxy is gone. If Sarvam's API doesn't send CORS headers for browser requests, you'll need to add a thin Vercel API proxy — see below.
-
-### Optional: Vercel API Proxy (if CORS errors occur in prod)
-
-Create `/api/sarvam.js` in the project root:
-
-```js
-// api/sarvam.js — Vercel serverless proxy
-export default async function handler(req, res) {
-  const path = req.query.path || '';
-  const url = `https://api.sarvam.ai/${path}`;
-  const upstream = await fetch(url, {
-    method: req.method,
-    headers: {
-      'api-subscription-key': process.env.SARVAM_API_KEY, // server-side, not exposed
-      ...(req.headers['content-type'] ? { 'content-type': req.headers['content-type'] } : {}),
-    },
-    body: req.method !== 'GET' ? req : undefined,
-  });
-  const data = await upstream.arrayBuffer();
-  res.status(upstream.status).send(Buffer.from(data));
-}
-```
-
-Then in `src/api/sarvam.js`, change:
-```js
-// From:
-const BASE = import.meta.env.DEV ? '/sarvam' : 'https://api.sarvam.ai';
-// To:
-const BASE = import.meta.env.DEV ? '/sarvam' : '/api/sarvam?path=';
+# Set your API key as a server-side environment variable
+vercel env add SARVAM_API_KEY production
+vercel --prod
 ```
 
 ---
 
-## 🧠 How It Works
+## Roadmap
 
-```
-[Hold Button → Speak → Release]
-        ↓
-Saaras v3 (mode=translate)    → English text   [STT, ~900ms]
-        ↓
-Mayura  (en-IN → target lang) → Translated text [~300ms, skipped for en↔te one direction]
-        ↓
-Bulbul v3                     → Audio (base64) [TTS, ~600ms]
-        ↓
-[Plays audio]
-```
-
-**Latency target:** ~1.5–2.5 seconds end-to-end.
-
-**English pivot strategy:** Saaras `mode=translate` converts any Indian language speech directly to English in one API call. This means we never need direct Indian↔Indian translation (Mayura doesn't support it anyway).
-
----
-
-## 🔑 API Key Security
-
-- For local dev: key is in `.env` (never committed to git)
-- For Vercel prod: key is in Vercel Environment Variables (server-side)
-- The Setup screen in the app also stores the key in `localStorage` as a convenience — this is fine for personal/demo use
-
----
-
-## 📦 Tech Stack
-- **React + Vite** — fast dev server, easy Vercel deploy
-- **MediaRecorder API** — browser-native audio recording
-- **Sarvam AI** — Saaras v3 (STT), Mayura (Translate), Bulbul v3 (TTS)
-
----
-
-## 🗺️ Roadmap
-- [ ] Add more language pairs (Kannada, Malayalam, Marathi…)
+- [ ] iOS app (React Native / Expo)
+- [ ] More language pairs (Odia, Assamese, Sindhi)
+- [ ] Auto language detection
 - [ ] Waveform visualiser during recording
+- [ ] Offline fallback for common phrases
 - [ ] Copy transcript button
-- [ ] Dark/light mode toggle
-- [ ] Offline fallback for common phrases (cached TTS)
+- [ ] Latency timer per message
