@@ -4,24 +4,15 @@ import { playBase64Audio } from './api/sarvam.js';
 
 // ─── Language pairs ───────────────────────────────────────────────────────────
 const LANGUAGE_PAIRS = [
-  {
-    id: 'hi-te',
-    labelA: 'हिंदी',
-    subA: 'Hindi',
-    labelB: 'తెలుగు',
-    subB: 'Telugu',
-    codeA: 'hi-IN',
-    codeB: 'te-IN',
-  },
-  {
-    id: 'en-te',
-    labelA: 'English',
-    subA: 'English',
-    labelB: 'తెలుగు',
-    subB: 'Telugu',
-    codeA: 'en-IN',
-    codeB: 'te-IN',
-  },
+  { id: 'hi-te', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'తెలుగు',   subB: 'Telugu',    codeA: 'hi-IN', codeB: 'te-IN' },
+  { id: 'hi-gu', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'ગુજરાતી', subB: 'Gujarati',  codeA: 'hi-IN', codeB: 'gu-IN' },
+  { id: 'hi-pa', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'ਪੰਜਾਬੀ',  subB: 'Punjabi',   codeA: 'hi-IN', codeB: 'pa-IN' },
+  { id: 'hi-kn', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'ಕನ್ನಡ',   subB: 'Kannada',   codeA: 'hi-IN', codeB: 'kn-IN' },
+  { id: 'hi-mr', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'मराठी',   subB: 'Marathi',   codeA: 'hi-IN', codeB: 'mr-IN' },
+  { id: 'hi-ta', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'தமிழ்',   subB: 'Tamil',     codeA: 'hi-IN', codeB: 'ta-IN' },
+  { id: 'hi-bn', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'বাংলা',   subB: 'Bengali',   codeA: 'hi-IN', codeB: 'bn-IN' },
+  { id: 'hi-ml', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'മലയാളം', subB: 'Malayalam', codeA: 'hi-IN', codeB: 'ml-IN' },
+  { id: 'en-te', labelA: 'English', subA: 'English', labelB: 'తెలుగు', subB: 'Telugu',   codeA: 'en-IN', codeB: 'te-IN' },
 ];
 
 const STEP_ICONS = { stt: '🎤', translate: '🔄', tts: '🔊', playing: '▶️', done: '' };
@@ -64,21 +55,36 @@ export default function App() {
     setShowSetup(false);
   };
 
-  const startRecording = useCallback(async (speaker) => {
+  const startRecording = useCallback((speaker) => {
     if (processing || recording) return;
     setError('');
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('Microphone not supported on this browser. Try Safari 14.3+ or Chrome.');
+      return;
+    }
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
       streamRef.current = stream;
-      const recorder = new MediaRecorder(stream);
+      // Pick a MIME type iOS Safari supports (prefers mp4, falls back to default)
+      const mimeType = ['audio/mp4', 'audio/webm', ''].find(
+        (t) => t === '' || MediaRecorder.isTypeSupported(t)
+      );
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       chunksRef.current = [];
       recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
       recorder.start(100);
       mediaRecRef.current = recorder;
       setRecording(speaker);
-    } catch {
-      setError('Microphone access denied. Please allow microphone access in browser settings.');
-    }
+    }).catch((err) => {
+      if (err.name === 'NotAllowedError') {
+        setError('Microphone permission denied. On iPhone: Settings → Privacy → Microphone → enable Safari.');
+      } else if (err.name === 'NotFoundError') {
+        setError('No microphone found on this device.');
+      } else {
+        setError(`Microphone error: ${err.name} — ${err.message}`);
+      }
+    });
   }, [processing, recording]);
 
   const stopRecording = useCallback(async (speaker) => {
@@ -94,7 +100,9 @@ export default function App() {
     });
     streamRef.current?.getTracks().forEach((t) => t.stop());
 
-    const audioBlob = new Blob(chunksRef.current, { type: 'audio/webm' });
+    const rawMime = mediaRecRef.current?.mimeType || 'audio/webm';
+    const mimeType = rawMime.split(';')[0]; // strip codecs e.g. "audio/mp4;codecs=opus" → "audio/mp4"
+    const audioBlob = new Blob(chunksRef.current, { type: mimeType });
     if (audioBlob.size < 1000) {
       setError('Recording too short. Hold the button while speaking.');
       setProcessing(false);
@@ -153,17 +161,18 @@ export default function App() {
           </div>
         </div>
 
-        <div style={s.pairTabs}>
+        <select
+          style={s.pairSelect}
+          value={pair.id}
+          onChange={(e) => {
+            const p = LANGUAGE_PAIRS.find((x) => x.id === e.target.value);
+            if (p) { setPair(p); setMessages([]); setError(''); }
+          }}
+        >
           {LANGUAGE_PAIRS.map((p) => (
-            <button
-              key={p.id}
-              style={{ ...s.pairTab, ...(pair.id === p.id ? s.pairTabActive : {}) }}
-              onClick={() => { setPair(p); setMessages([]); setError(''); }}
-            >
-              {p.subA} ↔ {p.subB}
-            </button>
+            <option key={p.id} value={p.id}>{p.subA} ↔ {p.subB}</option>
           ))}
-        </div>
+        </select>
 
         {!isProd && <button style={s.gearBtn} title="Settings" onClick={() => setShowSetup(true)}>⚙</button>}
       </header>
@@ -407,22 +416,18 @@ const s = {
   logoIcon: { fontSize: '1.6rem', color: COLORS.amber, fontFamily: "'Crimson Pro', serif" },
   logoName: { fontFamily: "'Crimson Pro', serif", fontSize: '1.1rem', fontWeight: 700, color: COLORS.amber, lineHeight: 1.1 },
   logoSub: { fontSize: '0.65rem', color: COLORS.muted, letterSpacing: '0.07em', textTransform: 'uppercase' },
-  pairTabs: { display: 'flex', gap: 6 },
-  pairTab: {
-    background: 'transparent',
+  pairSelect: {
+    background: COLORS.bg,
     border: `1px solid ${COLORS.border}`,
     borderRadius: 20,
-    padding: '4px 12px',
-    color: COLORS.muted,
-    fontSize: '0.75rem',
-    cursor: 'pointer',
-    fontFamily: "'DM Sans', sans-serif",
-    transition: 'all 0.15s',
-  },
-  pairTabActive: {
-    borderColor: COLORS.amber,
+    padding: '5px 14px',
     color: COLORS.amber,
-    background: `${COLORS.amber}18`,
+    fontSize: '0.78rem',
+    fontFamily: "'DM Sans', sans-serif",
+    cursor: 'pointer',
+    outline: 'none',
+    flex: 1,
+    maxWidth: 200,
   },
   gearBtn: {
     background: 'transparent',

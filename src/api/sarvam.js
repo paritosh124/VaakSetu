@@ -17,7 +17,8 @@ const BASE = import.meta.env.DEV ? '/sarvam' : '/api';
 //       'translate'  → returns English translation directly (skips a Mayura call!)
 export async function speechToText({ audioBlob, languageCode, mode = 'transcribe', apiKey }) {
   const fd = new FormData();
-  fd.append('file', audioBlob, 'audio.webm');
+  const ext = audioBlob.type.includes('mp4') ? 'm4a' : audioBlob.type.includes('ogg') ? 'ogg' : 'webm';
+  fd.append('file', audioBlob, `audio.${ext}`);
   fd.append('model', 'saaras:v3');
   fd.append('mode', mode);
   fd.append('language_code', languageCode); // pass 'unknown' for auto-detect
