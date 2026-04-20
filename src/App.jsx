@@ -1,19 +1,29 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { runTranslatePipeline } from './pipeline.js';
-import { playBase64Audio } from './api/sarvam.js';
+import { playBase64Audio, unlockAudio } from './api/sarvam.js';
 
-// ─── Language pairs ───────────────────────────────────────────────────────────
-const LANGUAGE_PAIRS = [
-  { id: 'hi-te', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'తెలుగు',   subB: 'Telugu',    codeA: 'hi-IN', codeB: 'te-IN' },
-  { id: 'hi-gu', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'ગુજરાતી', subB: 'Gujarati',  codeA: 'hi-IN', codeB: 'gu-IN' },
-  { id: 'hi-pa', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'ਪੰਜਾਬੀ',  subB: 'Punjabi',   codeA: 'hi-IN', codeB: 'pa-IN' },
-  { id: 'hi-kn', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'ಕನ್ನಡ',   subB: 'Kannada',   codeA: 'hi-IN', codeB: 'kn-IN' },
-  { id: 'hi-mr', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'मराठी',   subB: 'Marathi',   codeA: 'hi-IN', codeB: 'mr-IN' },
-  { id: 'hi-ta', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'தமிழ்',   subB: 'Tamil',     codeA: 'hi-IN', codeB: 'ta-IN' },
-  { id: 'hi-bn', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'বাংলা',   subB: 'Bengali',   codeA: 'hi-IN', codeB: 'bn-IN' },
-  { id: 'hi-ml', labelA: 'हिंदी', subA: 'Hindi',   labelB: 'മലയാളം', subB: 'Malayalam', codeA: 'hi-IN', codeB: 'ml-IN' },
-  { id: 'en-te', labelA: 'English', subA: 'English', labelB: 'తెలుగు', subB: 'Telugu',   codeA: 'en-IN', codeB: 'te-IN' },
+// ─── Languages (all Sarvam-supported) ────────────────────────────────────────
+const LANGUAGES = [
+  { code: 'hi-IN', name: 'Hindi',     native: 'हिंदी'    },
+  { code: 'en-IN', name: 'English',   native: 'English'  },
+  { code: 'bn-IN', name: 'Bengali',   native: 'বাংলা'    },
+  { code: 'gu-IN', name: 'Gujarati',  native: 'ગુજરાતી'  },
+  { code: 'kn-IN', name: 'Kannada',   native: 'ಕನ್ನಡ'    },
+  { code: 'ml-IN', name: 'Malayalam', native: 'മലയാളം'  },
+  { code: 'mr-IN', name: 'Marathi',   native: 'मराठी'    },
+  { code: 'od-IN', name: 'Odia',      native: 'ଓଡ଼ିଆ'    },
+  { code: 'pa-IN', name: 'Punjabi',   native: 'ਪੰਜਾਬੀ'   },
+  { code: 'ta-IN', name: 'Tamil',     native: 'தமிழ்'    },
+  { code: 'te-IN', name: 'Telugu',    native: 'తెలుగు'   },
 ];
+
+const getLang = (code) => LANGUAGES.find((l) => l.code === code) || LANGUAGES[0];
+
+// Bulbul v3 voices
+const VOICES = {
+  male:   'anand',
+  female: 'ritu',
+};
 
 const STEP_ICONS = { stt: '🎤', translate: '🔄', tts: '🔊', playing: '▶️', done: '' };
 
@@ -24,7 +34,16 @@ export default function App() {
   const [apiKey, setApiKey] = useState(isProd ? '' : (import.meta.env.VITE_SARVAM_API_KEY || storedKey));
   const [showSetup, setShowSetup] = useState(!isProd && !apiKey);
 
-  const [pair, setPair] = useState(LANGUAGE_PAIRS[0]);
+  const [langA, setLangA] = useState(() => localStorage.getItem('vs_langA') || 'hi-IN');
+  const [langB, setLangB] = useState(() => localStorage.getItem('vs_langB') || 'te-IN');
+  const [voiceA, setVoiceA] = useState(() => localStorage.getItem('vs_voiceA') || 'male');
+  const [voiceB, setVoiceB] = useState(() => localStorage.getItem('vs_voiceB') || 'female');
+
+  useEffect(() => { localStorage.setItem('vs_langA', langA); }, [langA]);
+  useEffect(() => { localStorage.setItem('vs_langB', langB); }, [langB]);
+  useEffect(() => { localStorage.setItem('vs_voiceA', voiceA); }, [voiceA]);
+  useEffect(() => { localStorage.setItem('vs_voiceB', voiceB); }, [voiceB]);
+
   const [recording, setRecording] = useState(null); // 'a' | 'b' | null
   const [processing, setProcessing] = useState(false);
   const [stepMsg, setStepMsg] = useState('');
@@ -63,6 +82,12 @@ export default function App() {
       setError('Microphone not supported on this browser. Try Safari 14.3+ or Chrome.');
       return;
     }
+
+    unlockAudio(); // must be called synchronously within user gesture for iOS Safari
+
+    // Pre-warm TCP/TLS connection to the API while user is still speaking
+    const warmBase = import.meta.env.DEV ? '/sarvam/speech-to-text' : '/api/speech-to-text';
+    fetch(warmBase, { method: 'HEAD' }).catch(() => {});
 
     navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
       streamRef.current = stream;
@@ -109,41 +134,44 @@ export default function App() {
       return;
     }
 
-    const sourceLang = speaker === 'a' ? pair.codeA : pair.codeB;
-    const targetLang = speaker === 'a' ? pair.codeB : pair.codeA;
+    const sourceLang = speaker === 'a' ? langA : langB;
+    const targetLang = speaker === 'a' ? langB : langA;
+    // Voice follows the LISTENER: when A speaks, B is hearing the output, so use B's voice preference
+    const voice = VOICES[speaker === 'a' ? voiceB : voiceA];
+
+    const srcLang = getLang(sourceLang);
+    const tgtLang = getLang(targetLang);
+    const messageId = Date.now();
+    const sourceLabel = `${srcLang.native} (${srcLang.name})`;
+    const targetLabel = `${tgtLang.native} (${tgtLang.name})`;
 
     try {
       const result = await runTranslatePipeline({
         audioBlob,
         sourceLang,
         targetLang,
-        speaker,
+        voice,
         apiKey,
         onStep: (id, msg) => { setStepId(id); setStepMsg(msg); },
+        onText: (pivotText, translatedText) => {
+          setMessages((prev) => [
+            ...prev,
+            { id: messageId, speaker, sourceLabel, targetLabel, pivotText, translatedText, sourceLang, targetLang },
+          ]);
+          setProcessing(false);
+          setStepId('');
+          setStepMsg('');
+        },
       });
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now(),
-          speaker,
-          sourceLabel: speaker === 'a' ? `${pair.labelA} (${pair.subA})` : `${pair.labelB} (${pair.subB})`,
-          targetLabel: speaker === 'a' ? `${pair.labelB} (${pair.subB})` : `${pair.labelA} (${pair.subA})`,
-          pivotText: result.pivotText,
-          translatedText: result.translatedText,
-          audioB64: result.audioB64,
-          sourceLang,
-          targetLang,
-        },
-      ]);
+      setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, audioB64: result.audioB64 } : m));
     } catch (err) {
       setError(err.message);
-    } finally {
       setProcessing(false);
       setStepId('');
       setStepMsg('');
     }
-  }, [recording, pair, apiKey]);
+  }, [recording, langA, langB, voiceA, voiceB, apiKey]);
 
   if (showSetup) {
     return <SetupScreen onSave={handleSaveKey} existingKey={apiKey} />;
@@ -160,22 +188,29 @@ export default function App() {
             <div style={s.logoSub}>Voice Translator</div>
           </div>
         </div>
-
-        <select
-          style={s.pairSelect}
-          value={pair.id}
-          onChange={(e) => {
-            const p = LANGUAGE_PAIRS.find((x) => x.id === e.target.value);
-            if (p) { setPair(p); setMessages([]); setError(''); }
-          }}
-        >
-          {LANGUAGE_PAIRS.map((p) => (
-            <option key={p.id} value={p.id}>{p.subA} ↔ {p.subB}</option>
-          ))}
-        </select>
-
         {!isProd && <button style={s.gearBtn} title="Settings" onClick={() => setShowSetup(true)}>⚙</button>}
       </header>
+
+      {/* ── Language + Voice selectors ── */}
+      <div style={s.selectorRow}>
+        <PersonSelector
+          color={COLORS.amber}
+          label="Person A"
+          lang={langA}
+          voice={voiceA}
+          onLangChange={(v) => { setLangA(v); setError(''); }}
+          onVoiceChange={setVoiceA}
+        />
+        <div style={s.selectorDivider}>↔</div>
+        <PersonSelector
+          color={COLORS.teal}
+          label="Person B"
+          lang={langB}
+          voice={voiceB}
+          onLangChange={(v) => { setLangB(v); setError(''); }}
+          onVoiceChange={setVoiceB}
+        />
+      </div>
 
       {/* ── Conversation ── */}
       <div style={s.feed}>
@@ -215,8 +250,8 @@ export default function App() {
       {/* ── Controls ── */}
       <div style={s.controls}>
         <SpeakerButton
-          label={pair.labelA}
-          sub={pair.subA}
+          label={getLang(langA).native}
+          sub={getLang(langA).name}
           color={COLORS.amber}
           isRecording={recording === 'a'}
           disabled={processing || recording === 'b'}
@@ -227,8 +262,8 @@ export default function App() {
         <div style={s.divider} />
 
         <SpeakerButton
-          label={pair.labelB}
-          sub={pair.subB}
+          label={getLang(langB).native}
+          sub={getLang(langB).name}
           color={COLORS.teal}
           isRecording={recording === 'b'}
           disabled={processing || recording === 'a'}
@@ -241,6 +276,40 @@ export default function App() {
 }
 
 // ─── Speaker Button ──────────────────────────────────────────────────────────
+// ─── Person Selector (language + voice) ──────────────────────────────────────
+function PersonSelector({ color, label, lang, voice, onLangChange, onVoiceChange }) {
+  return (
+    <div style={s.personCol}>
+      <div style={{ ...s.personLabel, color }}>{label}</div>
+      <select
+        style={{ ...s.langSelect, borderColor: color, color }}
+        value={lang}
+        onChange={(e) => onLangChange(e.target.value)}
+      >
+        {LANGUAGES.map((l) => (
+          <option key={l.code} value={l.code}>{l.name} — {l.native}</option>
+        ))}
+      </select>
+      <div style={s.voiceToggle}>
+        {['male', 'female'].map((g) => (
+          <button
+            key={g}
+            style={{
+              ...s.voiceBtn,
+              background: voice === g ? color : 'transparent',
+              color: voice === g ? '#0C0B1A' : color,
+              borderColor: color,
+            }}
+            onClick={() => onVoiceChange(g)}
+          >
+            {g === 'male' ? '♂ Male' : '♀ Female'}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SpeakerButton({ label, sub, color, isRecording, disabled, onStart, onStop }) {
   return (
     <div style={s.speakerWrap}>
@@ -416,18 +485,61 @@ const s = {
   logoIcon: { fontSize: '1.6rem', color: COLORS.amber, fontFamily: "'Crimson Pro', serif" },
   logoName: { fontFamily: "'Crimson Pro', serif", fontSize: '1.1rem', fontWeight: 700, color: COLORS.amber, lineHeight: 1.1 },
   logoSub: { fontSize: '0.65rem', color: COLORS.muted, letterSpacing: '0.07em', textTransform: 'uppercase' },
-  pairSelect: {
+  // Language + voice selector row
+  selectorRow: {
+    display: 'flex',
+    alignItems: 'stretch',
+    gap: 8,
+    padding: '10px 14px',
+    borderBottom: `1px solid ${COLORS.border}`,
+    background: COLORS.surface,
+    flexShrink: 0,
+  },
+  selectorDivider: {
+    display: 'flex',
+    alignItems: 'center',
+    color: COLORS.muted,
+    fontSize: '1.1rem',
+    flexShrink: 0,
+  },
+  personCol: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    minWidth: 0,
+  },
+  personLabel: {
+    fontSize: '0.65rem',
+    fontWeight: 600,
+    textTransform: 'uppercase',
+    letterSpacing: '0.06em',
+  },
+  langSelect: {
     background: COLORS.bg,
-    border: `1px solid ${COLORS.border}`,
-    borderRadius: 20,
-    padding: '5px 14px',
-    color: COLORS.amber,
-    fontSize: '0.78rem',
+    border: '1px solid',
+    borderRadius: 8,
+    padding: '6px 8px',
+    fontSize: '0.8rem',
     fontFamily: "'DM Sans', sans-serif",
     cursor: 'pointer',
     outline: 'none',
+    width: '100%',
+  },
+  voiceToggle: {
+    display: 'flex',
+    gap: 4,
+  },
+  voiceBtn: {
     flex: 1,
-    maxWidth: 200,
+    border: '1px solid',
+    borderRadius: 6,
+    padding: '4px 6px',
+    fontSize: '0.7rem',
+    fontFamily: "'DM Sans', sans-serif",
+    cursor: 'pointer',
+    fontWeight: 600,
+    transition: 'all 0.15s',
   },
   gearBtn: {
     background: 'transparent',

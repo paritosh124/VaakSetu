@@ -98,16 +98,29 @@ export async function textToSpeech({ text, languageCode, speaker = 'Anand', apiK
 }
 
 // ─── Audio Playback ──────────────────────────────────────────────────────────
-export function playBase64Audio(base64Str) {
-  return new Promise((resolve, reject) => {
-    const binary = atob(base64Str);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const blob = new Blob([bytes], { type: 'audio/wav' });
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
-    audio.onerror = (e) => { URL.revokeObjectURL(url); reject(new Error('Audio playback failed')); };
-    audio.play().catch(reject);
+// iOS Safari blocks audio.play() unless an AudioContext was unlocked during a user gesture.
+let _audioCtx = null;
+
+export function unlockAudio() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_audioCtx.state === 'suspended') _audioCtx.resume();
+}
+
+export async function playBase64Audio(base64Str) {
+  const binary = atob(base64Str);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const ctx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === 'suspended') await ctx.resume();
+
+  const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+
+  return new Promise((resolve) => {
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+    source.onended = resolve;
+    source.start(0);
   });
 }

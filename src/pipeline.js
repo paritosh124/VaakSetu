@@ -9,22 +9,18 @@
 
 import { speechToText, translateText, textToSpeech, playBase64Audio } from './api/sarvam.js';
 
-const SPEAKERS = {
-  a: 'anand',  // Person A voice
-  b: 'ritu',   // Person B voice — distinct so listeners can tell them apart
-};
-
 /**
  * @param {Object} opts
  * @param {Blob}     opts.audioBlob    - Recorded audio
  * @param {string}   opts.sourceLang   - BCP-47 code of speaker's language
  * @param {string}   opts.targetLang   - BCP-47 code of listener's language
- * @param {string}   opts.speaker      - 'a' or 'b' (chooses TTS voice)
+ * @param {string}   opts.voice        - Bulbul v3 speaker name (e.g. 'anand', 'ritu')
  * @param {string}   opts.apiKey
  * @param {Function} opts.onStep       - (stepId, message) => void  for UI updates
- * @returns {{ pivotText, translatedText, detectedLang }}
+ * @param {Function} opts.onText       - (pivotText, translatedText) => void  emitted as soon as text is ready
+ * @returns {{ pivotText, translatedText, audioB64, audioPromise, detectedLang }}
  */
-export async function runTranslatePipeline({ audioBlob, sourceLang, targetLang, speaker, apiKey, onStep }) {
+export async function runTranslatePipeline({ audioBlob, sourceLang, targetLang, voice, apiKey, onStep, onText }) {
   const isSourceEnglish = sourceLang === 'en-IN';
   const isTargetEnglish = targetLang === 'en-IN';
 
@@ -39,7 +35,7 @@ export async function runTranslatePipeline({ audioBlob, sourceLang, targetLang, 
     apiKey,
   });
 
-  const pivotText = sttResult.transcript; // Always English at this point
+  const pivotText = sttResult.transcript;
 
   // ── Step 2: Translate English → target language (skip if target IS English) ──
   let translatedText = pivotText;
@@ -54,25 +50,27 @@ export async function runTranslatePipeline({ audioBlob, sourceLang, targetLang, 
     });
   }
 
+  // ── Text is ready — notify UI immediately so it can render before audio ──
+  onText?.(pivotText, translatedText);
+
   // ── Step 3: Text → Speech ────────────────────────────────────────────────
   onStep('tts', 'Generating voice…');
   const audioB64 = await textToSpeech({
     text: translatedText,
     languageCode: targetLang,
-    speaker: SPEAKERS[speaker] ?? 'Anand',
+    speaker: voice || 'anand',
     apiKey,
   });
 
-  // ── Step 4: Play ─────────────────────────────────────────────────────────
+  // ── Step 4: Play (don't await — let caller handle in background) ─────────
   onStep('playing', 'Playing…');
-  await playBase64Audio(audioB64);
-
-  onStep('done', '');
+  const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
 
   return {
     pivotText,
     translatedText,
     audioB64,
+    audioPromise,
     detectedLang: sttResult.detectedLanguage,
   };
 }
