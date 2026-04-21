@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { runTranslatePipeline, speechToEnglish, englishToSpeech, runOpenAIPipeline, openaiSpeechToEnglishPipeline, openaiEnglishToSpeech } from './pipeline.js';
 import { playBase64Audio, unlockAudio } from './api/sarvam.js';
+import { SarvamStreamingSTT, supportsStreamingSTT } from './api/sarvam-streaming.js';
 import { Peer } from 'peerjs';
 import { generateRoomCode, hostPeerId } from './peer.js';
 
@@ -92,6 +93,12 @@ export default function App() {
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
   const conversationEndRef = useRef(null);
+  const streamingSTTRef = useRef(null); // SarvamStreamingSTT instance
+
+  // Key used for WebSocket streaming — must be client-side (visible in devtools)
+  const streamKey = import.meta.env.VITE_SARVAM_API_KEY || apiKey;
+
+  const [partialTranscript, setPartialTranscript] = useState('');
   const peerRef = useRef(null);
   const connRef = useRef(null);
   const partnerHandlerRef = useRef(null);
@@ -142,7 +149,8 @@ export default function App() {
 
     navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
       streamRef.current = stream;
-      // Pick a MIME type iOS Safari supports (prefers mp4, falls back to default)
+
+      // MediaRecorder — kept as fallback if WebSocket streaming fails
       const mimeType = ['audio/mp4', 'audio/webm', ''].find(
         (t) => t === '' || MediaRecorder.isTypeSupported(t)
       );
@@ -151,6 +159,25 @@ export default function App() {
       recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
       recorder.start(100);
       mediaRecRef.current = recorder;
+
+      // Streaming STT — Indian languages only, when API key is available
+      const sourceLang = remoteActive ? langA : (speaker === 'a' ? langA : langB);
+      const canStream = supportsStreamingSTT() && isIndianLang(sourceLang) && streamKey;
+      if (canStream) {
+        const sttMode = sourceLang === 'en-IN' ? 'transcribe' : 'translate';
+        const streamer = new SarvamStreamingSTT({
+          apiKey: streamKey,
+          languageCode: sourceLang,
+          mode: sttMode,
+          onPartial: (text) => setPartialTranscript(text),
+        });
+        streamer.start(stream).catch(() => {
+          // Streaming failed to connect — fall back to batch silently
+          streamingSTTRef.current = null;
+        });
+        streamingSTTRef.current = streamer;
+      }
+
       setRecording(speaker);
     }).catch((err) => {
       if (err.name === 'NotAllowedError') {
@@ -331,16 +358,23 @@ export default function App() {
 
     setRecording(null);
     setProcessing(true);
+    setPartialTranscript('');
 
-    // Wait for recorder to flush
-    await new Promise((resolve) => {
-      mediaRecRef.current.onstop = resolve;
-      mediaRecRef.current.stop();
-    });
+    // Stop MediaRecorder (fallback blob) and streaming STT in parallel
+    const [, streamingTranscript] = await Promise.all([
+      new Promise((resolve) => {
+        mediaRecRef.current.onstop = resolve;
+        mediaRecRef.current.stop();
+      }),
+      streamingSTTRef.current
+        ? streamingSTTRef.current.stop().catch(() => '')
+        : Promise.resolve(''),
+    ]);
+    streamingSTTRef.current = null;
     streamRef.current?.getTracks().forEach((t) => t.stop());
 
     const rawMime = mediaRecRef.current?.mimeType || 'audio/webm';
-    const mimeType = rawMime.split(';')[0]; // strip codecs e.g. "audio/mp4;codecs=opus" → "audio/mp4"
+    const mimeType = rawMime.split(';')[0];
     const audioBlob = new Blob(chunksRef.current, { type: mimeType });
     if (audioBlob.size < 1000) {
       setError('Recording too short. Hold the button while speaking.');
@@ -348,21 +382,23 @@ export default function App() {
       return;
     }
 
+    // streamingTranscript is already the English pivot (mode=translate) or
+    // verbatim text (mode=transcribe). Non-empty means we can skip STT.
+    const pivotFromStream = streamingTranscript?.trim() || null;
+
     // ── Remote (two-phone) branch ────────────────────────────────────────────
     if (remoteActive) {
       const srcLang = getLang(langA);
       const messageId = Date.now();
       const sourceLabel = `${srcLang.native} (${srcLang.name})`;
       const useOpenAIRemote = !isIndianLang(langA);
+      const onStepR = (id, m) => { setStepId(id); setStepMsg(m); };
       try {
-        const pivotText = useOpenAIRemote
-          ? await openaiSpeechToEnglishPipeline({ audioBlob, openaiKey, onStep: (id, m) => { setStepId(id); setStepMsg(m); } })
-          : await speechToEnglish({
-              audioBlob,
-              sourceLang: langA,
-              apiKey,
-              onStep: (id, m) => { setStepId(id); setStepMsg(m); },
-            });
+        const pivotText = pivotFromStream
+          ? (onStepR('stt', ''), pivotFromStream)  // streaming gave us text — skip STT call
+          : useOpenAIRemote
+            ? await openaiSpeechToEnglishPipeline({ audioBlob, openaiKey, onStep: onStepR })
+            : await speechToEnglish({ audioBlob, sourceLang: langA, apiKey, onStep: onStepR });
         if (connRef.current?.open) {
           connRef.current.send({ type: 'english', text: pivotText, sourceLang: langA, ts: Date.now() });
         } else {
@@ -408,27 +444,43 @@ export default function App() {
     };
 
     try {
-      const result = useOpenAI
-        ? await runOpenAIPipeline({
-            audioBlob,
-            sourceLang,
-            sourceLangName: srcLang.name,
-            targetLang,
-            targetLangName: tgtLang.name,
-            voiceGender: listenerVoice,
-            openaiKey,
-            onStep,
-            onText,
-          })
-        : await runTranslatePipeline({
-            audioBlob,
-            sourceLang,
-            targetLang,
-            voice,
-            apiKey,
-            onStep,
-            onText,
-          });
+      let result;
+
+      if (pivotFromStream && !useOpenAI) {
+        // ── Fast path: streaming STT gave us English pivot → skip STT call ──
+        // Go directly to Translate → TTS using englishToSpeech()
+        onStep('stt', ''); // clear step
+        result = await englishToSpeech({
+          pivotText: pivotFromStream,
+          targetLang,
+          voice,
+          apiKey,
+          onStep,
+          onText,
+        });
+      } else if (useOpenAI) {
+        result = await runOpenAIPipeline({
+          audioBlob,
+          sourceLang,
+          sourceLangName: srcLang.name,
+          targetLang,
+          targetLangName: tgtLang.name,
+          voiceGender: listenerVoice,
+          openaiKey,
+          onStep,
+          onText,
+        });
+      } else {
+        result = await runTranslatePipeline({
+          audioBlob,
+          sourceLang,
+          targetLang,
+          voice,
+          apiKey,
+          onStep,
+          onText,
+        });
+      }
 
       setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, audioB64: result.audioB64 } : m));
     } catch (err) {
@@ -437,7 +489,7 @@ export default function App() {
       setStepId('');
       setStepMsg('');
     }
-  }, [recording, remoteActive, langA, langB, voiceA, voiceB, apiKey, openaiKey]);
+  }, [recording, remoteActive, langA, langB, voiceA, voiceB, apiKey, openaiKey, streamKey]);
 
   if (showSetup) {
     return <SetupScreen onSave={handleSaveKey} existingKey={apiKey} existingOaiKey={openaiKey} />;
@@ -569,6 +621,14 @@ export default function App() {
         {messages.map((msg) => (
           <MessageBubble key={msg.id} msg={msg} />
         ))}
+
+        {/* Live partial transcript while speaking */}
+        {recording && partialTranscript && (
+          <div style={s.partialRow}>
+            <span style={s.partialDot}>●</span>
+            <span style={s.partialText}>{partialTranscript}</span>
+          </div>
+        )}
 
         {processing && (
           <div style={s.processingRow}>
@@ -1092,6 +1152,33 @@ const s = {
     fontSize: '1rem',
     lineHeight: 1.55,
     color: COLORS.text,
+  },
+
+  // Live partial transcript (streaming STT)
+  partialRow: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: '10px 14px',
+    background: 'transparent',
+    border: `1px dashed ${COLORS.border}`,
+    borderRadius: 12,
+    alignSelf: 'center',
+    maxWidth: '82%',
+    animation: 'fade-up 0.15s ease forwards',
+  },
+  partialDot: {
+    fontSize: '0.5rem',
+    color: COLORS.amber,
+    marginTop: 4,
+    flexShrink: 0,
+    animation: 'pulse-ring 1s ease-in-out infinite',
+  },
+  partialText: {
+    fontSize: '0.9rem',
+    color: COLORS.muted,
+    fontStyle: 'italic',
+    lineHeight: 1.5,
   },
 
   // Processing row
