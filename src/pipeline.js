@@ -8,6 +8,43 @@
  */
 
 import { speechToText, translateText, textToSpeech, playBase64Audio } from './api/sarvam.js';
+import { openaiSpeechToEnglish, openaiSpeechToText, openaiTranslate, openaiTTS } from './api/openai.js';
+
+/**
+ * Sender half — used in remote (two-phone) mode.
+ * Speech → English pivot text only. Result is sent to partner over WebRTC.
+ */
+export async function speechToEnglish({ audioBlob, sourceLang, apiKey, onStep }) {
+  const isSourceEnglish = sourceLang === 'en-IN';
+  const mode = isSourceEnglish ? 'transcribe' : 'translate';
+  onStep?.('stt', isSourceEnglish ? 'Transcribing…' : 'Converting speech to English…');
+  const sttResult = await speechToText({ audioBlob, languageCode: sourceLang, mode, apiKey });
+  return sttResult.transcript;
+}
+
+/**
+ * Receiver half — used in remote (two-phone) mode.
+ * English pivot text → TTS in my language with my voice.
+ */
+export async function englishToSpeech({ pivotText, targetLang, voice, apiKey, onStep, onText }) {
+  const isTargetEnglish = targetLang === 'en-IN';
+  let translatedText = pivotText;
+
+  if (!isTargetEnglish) {
+    onStep?.('translate', `Translating to ${targetLang.split('-')[0].toUpperCase()}…`);
+    translatedText = await translateText({ text: pivotText, sourceLang: 'en-IN', targetLang, apiKey });
+  }
+
+  onText?.(pivotText, translatedText);
+
+  onStep?.('tts', 'Generating voice…');
+  const audioB64 = await textToSpeech({ text: translatedText, languageCode: targetLang, speaker: voice || 'anand', apiKey });
+
+  onStep?.('playing', 'Playing…');
+  const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
+
+  return { pivotText, translatedText, audioB64, audioPromise };
+}
 
 /**
  * @param {Object} opts
@@ -73,4 +110,89 @@ export async function runTranslatePipeline({ audioBlob, sourceLang, targetLang, 
     audioPromise,
     detectedLang: sttResult.detectedLanguage,
   };
+}
+
+// ─── OpenAI pipeline (international languages) ───────────────────────────────
+
+/**
+ * Full OpenAI pipeline: Whisper STT → GPT translate → TTS-1
+ * sourceLang / targetLang are 2-letter ISO codes (e.g. 'es', 'ja')
+ * OR 'en-IN' for English (handled correctly — skips translate step if target is English)
+ */
+export async function runOpenAIPipeline({
+  audioBlob,
+  sourceLang,
+  sourceLangName,
+  targetLang,
+  targetLangName,
+  voiceGender,
+  openaiKey,
+  onStep,
+  onText,
+}) {
+  const isTargetEnglish = targetLang === 'en-IN' || targetLang === 'en';
+
+  // Step 1: Whisper → English pivot
+  onStep('stt', 'Transcribing speech…');
+  const pivotText = await openaiSpeechToEnglish({ audioBlob, apiKey: openaiKey });
+
+  // Step 2: GPT translate (skip if target is English)
+  let translatedText = pivotText;
+  if (!isTargetEnglish) {
+    onStep('translate', `Translating to ${targetLangName}…`);
+    translatedText = await openaiTranslate({ text: pivotText, targetLangName, apiKey: openaiKey });
+  }
+
+  onText?.(pivotText, translatedText);
+
+  // Step 3: TTS-1
+  onStep('tts', 'Generating voice…');
+  const voice = voiceGender === 'female' ? 'nova' : 'onyx';
+  const audioB64 = await openaiTTS({ text: translatedText, voice, apiKey: openaiKey });
+
+  onStep('playing', 'Playing…');
+  const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
+
+  return { pivotText, translatedText, audioB64, audioPromise };
+}
+
+/**
+ * Sender half for remote mode — Whisper → English pivot only.
+ * Works for any language (including Indian).
+ */
+export async function openaiSpeechToEnglishPipeline({ audioBlob, openaiKey, onStep }) {
+  onStep?.('stt', 'Transcribing speech…');
+  return openaiSpeechToEnglish({ audioBlob, apiKey: openaiKey });
+}
+
+/**
+ * Receiver half for remote mode — English → TTS in target international language.
+ */
+export async function openaiEnglishToSpeech({
+  pivotText,
+  targetLang,
+  targetLangName,
+  voiceGender,
+  openaiKey,
+  onStep,
+  onText,
+}) {
+  const isTargetEnglish = targetLang === 'en-IN' || targetLang === 'en';
+  let translatedText = pivotText;
+
+  if (!isTargetEnglish) {
+    onStep?.('translate', `Translating to ${targetLangName}…`);
+    translatedText = await openaiTranslate({ text: pivotText, targetLangName, apiKey: openaiKey });
+  }
+
+  onText?.(pivotText, translatedText);
+
+  onStep?.('tts', 'Generating voice…');
+  const voice = voiceGender === 'female' ? 'nova' : 'onyx';
+  const audioB64 = await openaiTTS({ text: translatedText, voice, apiKey: openaiKey });
+
+  onStep?.('playing', 'Playing…');
+  const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
+
+  return { pivotText, translatedText, audioB64, audioPromise };
 }

@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { runTranslatePipeline } from './pipeline.js';
+import { runTranslatePipeline, speechToEnglish, englishToSpeech, runOpenAIPipeline, openaiSpeechToEnglishPipeline, openaiEnglishToSpeech } from './pipeline.js';
 import { playBase64Audio, unlockAudio } from './api/sarvam.js';
+import { Peer } from 'peerjs';
+import { generateRoomCode, hostPeerId } from './peer.js';
 
 // ─── Languages (all Sarvam-supported) ────────────────────────────────────────
 const LANGUAGES = [
@@ -11,15 +13,43 @@ const LANGUAGES = [
   { code: 'kn-IN', name: 'Kannada',   native: 'ಕನ್ನಡ'    },
   { code: 'ml-IN', name: 'Malayalam', native: 'മലയാളം'  },
   { code: 'mr-IN', name: 'Marathi',   native: 'मराठी'    },
-  { code: 'od-IN', name: 'Odia',      native: 'ଓଡ଼ିଆ'    },
+  { code: 'or-IN', name: 'Odia',      native: 'ଓଡ଼ିଆ'    },
   { code: 'pa-IN', name: 'Punjabi',   native: 'ਪੰਜਾਬੀ'   },
   { code: 'ta-IN', name: 'Tamil',     native: 'தமிழ்'    },
   { code: 'te-IN', name: 'Telugu',    native: 'తెలుగు'   },
 ];
 
-const getLang = (code) => LANGUAGES.find((l) => l.code === code) || LANGUAGES[0];
+const getLang = (code) =>
+  LANGUAGES.find((l) => l.code === code) ||
+  INTL_LANGUAGES.find((l) => l.code === code) ||
+  LANGUAGES[0];
 
-// Bulbul v3 voices
+// International (non-Indian) languages via OpenAI
+const INTL_LANGUAGES = [
+  { code: 'es', name: 'Spanish',    native: 'Español'           },
+  { code: 'fr', name: 'French',     native: 'Français'          },
+  { code: 'de', name: 'German',     native: 'Deutsch'           },
+  { code: 'ja', name: 'Japanese',   native: '日本語'              },
+  { code: 'zh', name: 'Chinese',    native: '中文'               },
+  { code: 'ar', name: 'Arabic',     native: 'العربية'           },
+  { code: 'pt', name: 'Portuguese', native: 'Português'         },
+  { code: 'ru', name: 'Russian',    native: 'Русский'           },
+  { code: 'it', name: 'Italian',    native: 'Italiano'          },
+  { code: 'ko', name: 'Korean',     native: '한국어'              },
+  { code: 'nl', name: 'Dutch',      native: 'Nederlands'        },
+  { code: 'tr', name: 'Turkish',    native: 'Türkçe'            },
+  { code: 'pl', name: 'Polish',     native: 'Polski'            },
+  { code: 'sv', name: 'Swedish',    native: 'Svenska'           },
+  { code: 'th', name: 'Thai',       native: 'ไทย'               },
+  { code: 'vi', name: 'Vietnamese', native: 'Tiếng Việt'        },
+  { code: 'id', name: 'Indonesian', native: 'Bahasa Indonesia'  },
+  { code: 'uk', name: 'Ukrainian',  native: 'Українська'        },
+];
+
+const INDIAN_CODES = new Set(LANGUAGES.map((l) => l.code));
+const isIndianLang = (code) => INDIAN_CODES.has(code);
+
+// Bulbul v3 voices (Sarvam) — also used as gender key for OpenAI (onyx/nova)
 const VOICES = {
   male:   'anand',
   female: 'ritu',
@@ -31,18 +61,25 @@ const STEP_ICONS = { stt: '🎤', translate: '🔄', tts: '🔊', playing: '▶�
 export default function App() {
   const isProd = import.meta.env.PROD;
   const storedKey = !isProd && typeof localStorage !== 'undefined' ? localStorage.getItem('sarvam_key') || '' : '';
+  const storedOAIKey = !isProd && typeof localStorage !== 'undefined' ? localStorage.getItem('openai_key') || '' : '';
   const [apiKey, setApiKey] = useState(isProd ? '' : (import.meta.env.VITE_SARVAM_API_KEY || storedKey));
+  const [openaiKey, setOpenaiKey] = useState(isProd ? '' : (import.meta.env.VITE_OPENAI_API_KEY || storedOAIKey));
   const [showSetup, setShowSetup] = useState(!isProd && !apiKey);
 
-  const [langA, setLangA] = useState(() => localStorage.getItem('vs_langA') || 'hi-IN');
-  const [langB, setLangB] = useState(() => localStorage.getItem('vs_langB') || 'te-IN');
+  const fixLang = (v) => (v === 'od-IN' ? 'or-IN' : v); // migrate old Odia code
+  const [langA, setLangA] = useState(() => fixLang(localStorage.getItem('vs_langA')) || 'hi-IN');
+  const [langB, setLangB] = useState(() => fixLang(localStorage.getItem('vs_langB')) || 'te-IN');
   const [voiceA, setVoiceA] = useState(() => localStorage.getItem('vs_voiceA') || 'male');
   const [voiceB, setVoiceB] = useState(() => localStorage.getItem('vs_voiceB') || 'female');
+  const [langTypeA, setLangTypeA] = useState(() => localStorage.getItem('vs_ltypeA') || 'indian');
+  const [langTypeB, setLangTypeB] = useState(() => localStorage.getItem('vs_ltypeB') || 'indian');
 
   useEffect(() => { localStorage.setItem('vs_langA', langA); }, [langA]);
   useEffect(() => { localStorage.setItem('vs_langB', langB); }, [langB]);
   useEffect(() => { localStorage.setItem('vs_voiceA', voiceA); }, [voiceA]);
   useEffect(() => { localStorage.setItem('vs_voiceB', voiceB); }, [voiceB]);
+  useEffect(() => { localStorage.setItem('vs_ltypeA', langTypeA); }, [langTypeA]);
+  useEffect(() => { localStorage.setItem('vs_ltypeB', langTypeB); }, [langTypeB]);
 
   const [recording, setRecording] = useState(null); // 'a' | 'b' | null
   const [processing, setProcessing] = useState(false);
@@ -55,6 +92,18 @@ export default function App() {
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
   const conversationEndRef = useRef(null);
+  const peerRef = useRef(null);
+  const connRef = useRef(null);
+  const partnerHandlerRef = useRef(null);
+
+  // Remote (two-phone) mode state
+  const [remoteActive, setRemoteActive] = useState(false);
+  const [peerState, setPeerState] = useState('idle'); // 'idle' | 'hosting' | 'joining' | 'connected' | 'error'
+  const [roomCode, setRoomCode] = useState('');
+  const [joinCodeInput, setJoinCodeInput] = useState('');
+  const [partnerLang, setPartnerLang] = useState('');
+  const [remoteError, setRemoteError] = useState('');
+  const [remoteModal, setRemoteModal] = useState(null); // null | 'choose' | 'host' | 'join'
 
   // Auto-scroll to latest message
   useEffect(() => {
@@ -68,9 +117,11 @@ export default function App() {
     return () => document.removeEventListener('contextmenu', block);
   }, []);
 
-  const handleSaveKey = (key) => {
-    setApiKey(key);
-    try { localStorage.setItem('sarvam_key', key); } catch {}
+  const handleSaveKey = (sarvamKey, oaiKey) => {
+    setApiKey(sarvamKey);
+    setOpenaiKey(oaiKey);
+    try { localStorage.setItem('sarvam_key', sarvamKey); } catch {}
+    try { localStorage.setItem('openai_key', oaiKey); } catch {}
     setShowSetup(false);
   };
 
@@ -112,6 +163,169 @@ export default function App() {
     });
   }, [processing, recording]);
 
+  // ── Remote mode: incoming message from partner (English pivot → local TTS) ──
+  const handlePartnerMessage = useCallback(async (msg) => {
+    if (!msg || !msg.type) return;
+    if (msg.type === 'hello') {
+      setPartnerLang(msg.lang || '');
+      return;
+    }
+    if (msg.type !== 'english' || !msg.text) return;
+
+    const messageId = Date.now();
+    const srcLang = getLang(msg.sourceLang || 'en-IN');
+    const tgtLang = getLang(langA);
+    const sourceLabel = `Partner · ${srcLang.native}`;
+    const targetLabel = `${tgtLang.native} (${tgtLang.name})`;
+
+    const useOpenAI = !isIndianLang(langA);
+    const onStep = (id, m) => { setStepId(id); setStepMsg(m); };
+    const onText = (pivotText, translatedText) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: messageId,
+          speaker: 'b',
+          sourceLabel,
+          targetLabel,
+          pivotText,
+          translatedText,
+          sourceLang: msg.sourceLang || 'en-IN',
+          targetLang: langA,
+        },
+      ]);
+      setProcessing(false);
+      setStepId('');
+      setStepMsg('');
+    };
+
+    try {
+      setProcessing(true);
+      const result = useOpenAI
+        ? await openaiEnglishToSpeech({
+            pivotText: msg.text,
+            targetLang: langA,
+            targetLangName: tgtLang.name,
+            voiceGender: voiceA,
+            openaiKey,
+            onStep,
+            onText,
+          })
+        : await englishToSpeech({
+            pivotText: msg.text,
+            targetLang: langA,
+            voice: VOICES[voiceA],
+            apiKey,
+            onStep,
+            onText,
+          });
+      setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, audioB64: result.audioB64 } : m));
+    } catch (err) {
+      setError(err.message);
+      setProcessing(false);
+      setStepId('');
+      setStepMsg('');
+    }
+  }, [langA, voiceA, apiKey, openaiKey]);
+
+  // Keep latest handler in a ref so PeerJS callbacks always see fresh state
+  useEffect(() => { partnerHandlerRef.current = handlePartnerMessage; }, [handlePartnerMessage]);
+
+  const attachConnection = useCallback((conn) => {
+    connRef.current = conn;
+    conn.on('open', () => {
+      setPeerState('connected');
+      setRemoteModal(null);
+      try { conn.send({ type: 'hello', lang: langA, voice: voiceA }); } catch {}
+    });
+    conn.on('data', (data) => partnerHandlerRef.current?.(data));
+    conn.on('close', () => {
+      setPeerState('idle');
+      setRemoteError('Partner disconnected.');
+      connRef.current = null;
+    });
+    conn.on('error', (err) => {
+      setRemoteError(`Connection error: ${err.type || err.message || 'unknown'}`);
+    });
+  }, [langA, voiceA]);
+
+  const createRoom = useCallback(() => {
+    unlockAudio();
+    setRemoteError('');
+    const code = generateRoomCode();
+    setRoomCode(code);
+    setPeerState('hosting');
+    setRemoteModal('host');
+    try { peerRef.current?.destroy(); } catch {}
+    const peer = new Peer(hostPeerId(code), { debug: 1 });
+    peerRef.current = peer;
+    peer.on('connection', attachConnection);
+    peer.on('error', (err) => {
+      const type = err.type || '';
+      if (type === 'unavailable-id') {
+        setRemoteError('Room code clash — try creating again.');
+      } else {
+        setRemoteError(`Peer error: ${type || err.message || 'unknown'}`);
+      }
+      setPeerState('error');
+    });
+  }, [attachConnection]);
+
+  const joinRoom = useCallback((rawCode) => {
+    const code = (rawCode || '').trim().toUpperCase();
+    if (code.length !== 4) {
+      setRemoteError('Enter the 4-letter room code.');
+      return;
+    }
+    unlockAudio();
+    setRemoteError('');
+    setRoomCode(code);
+    setPeerState('joining');
+    try { peerRef.current?.destroy(); } catch {}
+    const peer = new Peer(undefined, { debug: 1 });
+    peerRef.current = peer;
+    peer.on('open', () => {
+      const conn = peer.connect(hostPeerId(code), { reliable: true });
+      attachConnection(conn);
+    });
+    peer.on('error', (err) => {
+      const type = err.type || '';
+      if (type === 'peer-unavailable') {
+        setRemoteError(`Room ${code} not found. Check the code with your partner.`);
+      } else {
+        setRemoteError(`Peer error: ${type || err.message || 'unknown'}`);
+      }
+      setPeerState('error');
+    });
+  }, [attachConnection]);
+
+  const disconnectRemote = useCallback(() => {
+    try { connRef.current?.close(); } catch {}
+    try { peerRef.current?.destroy(); } catch {}
+    connRef.current = null;
+    peerRef.current = null;
+    setPeerState('idle');
+    setRoomCode('');
+    setJoinCodeInput('');
+    setPartnerLang('');
+    setRemoteError('');
+    setRemoteModal(null);
+    setRemoteActive(false);
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => () => {
+    try { connRef.current?.close(); } catch {}
+    try { peerRef.current?.destroy(); } catch {}
+  }, []);
+
+  // Notify partner when my language/voice preferences change after connecting
+  useEffect(() => {
+    if (peerState === 'connected' && connRef.current?.open) {
+      try { connRef.current.send({ type: 'hello', lang: langA, voice: voiceA }); } catch {}
+    }
+  }, [langA, voiceA, peerState]);
+
   const stopRecording = useCallback(async (speaker) => {
     if (!mediaRecRef.current || recording !== speaker) return;
 
@@ -134,10 +348,45 @@ export default function App() {
       return;
     }
 
+    // ── Remote (two-phone) branch ────────────────────────────────────────────
+    if (remoteActive) {
+      const srcLang = getLang(langA);
+      const messageId = Date.now();
+      const sourceLabel = `${srcLang.native} (${srcLang.name})`;
+      const useOpenAIRemote = !isIndianLang(langA);
+      try {
+        const pivotText = useOpenAIRemote
+          ? await openaiSpeechToEnglishPipeline({ audioBlob, openaiKey, onStep: (id, m) => { setStepId(id); setStepMsg(m); } })
+          : await speechToEnglish({
+              audioBlob,
+              sourceLang: langA,
+              apiKey,
+              onStep: (id, m) => { setStepId(id); setStepMsg(m); },
+            });
+        if (connRef.current?.open) {
+          connRef.current.send({ type: 'english', text: pivotText, sourceLang: langA, ts: Date.now() });
+        } else {
+          setError('Not connected to partner. Please reconnect.');
+        }
+        setMessages((prev) => [
+          ...prev,
+          { id: messageId, speaker: 'a', sourceLabel, targetLabel: 'Sent to partner', pivotText, translatedText: pivotText, sourceLang: langA, targetLang: 'en-IN', remote: true },
+        ]);
+      } catch (err) {
+        setError(err.message);
+      }
+      setProcessing(false);
+      setStepId('');
+      setStepMsg('');
+      return;
+    }
+
+    // ── Solo (single-device) branch ──────────────────────────────────────────
     const sourceLang = speaker === 'a' ? langA : langB;
     const targetLang = speaker === 'a' ? langB : langA;
     // Voice follows the LISTENER: when A speaks, B is hearing the output, so use B's voice preference
-    const voice = VOICES[speaker === 'a' ? voiceB : voiceA];
+    const listenerVoice = speaker === 'a' ? voiceB : voiceA;
+    const voice = VOICES[listenerVoice]; // Sarvam voice name
 
     const srcLang = getLang(sourceLang);
     const tgtLang = getLang(targetLang);
@@ -145,24 +394,41 @@ export default function App() {
     const sourceLabel = `${srcLang.native} (${srcLang.name})`;
     const targetLabel = `${tgtLang.native} (${tgtLang.name})`;
 
+    const useOpenAI = !isIndianLang(sourceLang) || !isIndianLang(targetLang);
+
+    const onStep = (id, msg) => { setStepId(id); setStepMsg(msg); };
+    const onText = (pivotText, translatedText) => {
+      setMessages((prev) => [
+        ...prev,
+        { id: messageId, speaker, sourceLabel, targetLabel, pivotText, translatedText, sourceLang, targetLang },
+      ]);
+      setProcessing(false);
+      setStepId('');
+      setStepMsg('');
+    };
+
     try {
-      const result = await runTranslatePipeline({
-        audioBlob,
-        sourceLang,
-        targetLang,
-        voice,
-        apiKey,
-        onStep: (id, msg) => { setStepId(id); setStepMsg(msg); },
-        onText: (pivotText, translatedText) => {
-          setMessages((prev) => [
-            ...prev,
-            { id: messageId, speaker, sourceLabel, targetLabel, pivotText, translatedText, sourceLang, targetLang },
-          ]);
-          setProcessing(false);
-          setStepId('');
-          setStepMsg('');
-        },
-      });
+      const result = useOpenAI
+        ? await runOpenAIPipeline({
+            audioBlob,
+            sourceLang,
+            sourceLangName: srcLang.name,
+            targetLang,
+            targetLangName: tgtLang.name,
+            voiceGender: listenerVoice,
+            openaiKey,
+            onStep,
+            onText,
+          })
+        : await runTranslatePipeline({
+            audioBlob,
+            sourceLang,
+            targetLang,
+            voice,
+            apiKey,
+            onStep,
+            onText,
+          });
 
       setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, audioB64: result.audioB64 } : m));
     } catch (err) {
@@ -171,11 +437,13 @@ export default function App() {
       setStepId('');
       setStepMsg('');
     }
-  }, [recording, langA, langB, voiceA, voiceB, apiKey]);
+  }, [recording, remoteActive, langA, langB, voiceA, voiceB, apiKey, openaiKey]);
 
   if (showSetup) {
-    return <SetupScreen onSave={handleSaveKey} existingKey={apiKey} />;
+    return <SetupScreen onSave={handleSaveKey} existingKey={apiKey} existingOaiKey={openaiKey} />;
   }
+
+  const partnerLangInfo = getLang(partnerLang || 'hi-IN');
 
   return (
     <div style={s.root}>
@@ -185,43 +453,115 @@ export default function App() {
           <span style={s.logoIcon}>𝕍</span>
           <div>
             <div style={s.logoName}>VaakSetu</div>
-            <div style={s.logoSub}>Voice Translator</div>
+            <div style={s.logoSub}>{remoteActive ? 'Remote Mode' : 'Voice Translator'}</div>
           </div>
         </div>
-        {!isProd && <button style={s.gearBtn} title="Settings" onClick={() => setShowSetup(true)}>⚙</button>}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {remoteActive ? (
+            <>
+              {peerState === 'connected' && (
+                <div style={s.connectedBadge}>
+                  <span style={{ color: '#4ade80', fontSize: '0.55rem' }}>●</span> Connected
+                </div>
+              )}
+              <button style={s.remoteBtn} onClick={disconnectRemote}>Disconnect</button>
+            </>
+          ) : (
+            <button
+              style={s.remoteBtn}
+              onClick={() => { setRemoteActive(true); setRemoteModal('choose'); }}
+            >
+              📱 Two Phones
+            </button>
+          )}
+          {!isProd && <button style={s.gearBtn} title="Settings" onClick={() => setShowSetup(true)}>⚙</button>}
+        </div>
       </header>
+
+      {/* ── Remote pairing modal ── */}
+      {remoteModal && (
+        <RemoteModal
+          mode={remoteModal}
+          peerState={peerState}
+          roomCode={roomCode}
+          joinCodeInput={joinCodeInput}
+          remoteError={remoteError}
+          onSetMode={setRemoteModal}
+          onJoinInputChange={(v) => { setJoinCodeInput(v.toUpperCase()); setRemoteError(''); }}
+          onCreateRoom={createRoom}
+          onJoinRoom={() => joinRoom(joinCodeInput)}
+          onCancel={() => { disconnectRemote(); }}
+        />
+      )}
 
       {/* ── Language + Voice selectors ── */}
       <div style={s.selectorRow}>
-        <PersonSelector
-          color={COLORS.amber}
-          label="Person A"
-          lang={langA}
-          voice={voiceA}
-          onLangChange={(v) => { setLangA(v); setError(''); }}
-          onVoiceChange={setVoiceA}
-        />
-        <div style={s.selectorDivider}>↔</div>
-        <PersonSelector
-          color={COLORS.teal}
-          label="Person B"
-          lang={langB}
-          voice={voiceB}
-          onLangChange={(v) => { setLangB(v); setError(''); }}
-          onVoiceChange={setVoiceB}
-        />
+        {remoteActive ? (
+          <>
+            <PersonSelector
+              color={COLORS.amber}
+              label="My Language"
+              lang={langA}
+              voice={voiceA}
+              langType={langTypeA}
+              onLangChange={(v) => { setLangA(v); setError(''); }}
+              onVoiceChange={setVoiceA}
+              onLangTypeChange={setLangTypeA}
+            />
+            <div style={s.selectorDivider}>↔</div>
+            <div style={s.personCol}>
+              <div style={{ ...s.personLabel, color: COLORS.teal }}>Partner's Language</div>
+              <div style={{ ...s.langSelect, borderColor: COLORS.teal, color: COLORS.teal, display: 'flex', alignItems: 'center' }}>
+                {partnerLang
+                  ? `${partnerLangInfo.name} — ${partnerLangInfo.native}`
+                  : <span style={{ color: COLORS.muted }}>Waiting…</span>}
+              </div>
+              <div style={{ fontSize: '0.68rem', color: COLORS.muted, marginTop: 2 }}>Set on their phone</div>
+            </div>
+          </>
+        ) : (
+          <>
+            <PersonSelector
+              color={COLORS.amber}
+              label="Person A"
+              lang={langA}
+              voice={voiceA}
+              langType={langTypeA}
+              onLangChange={(v) => { setLangA(v); setError(''); }}
+              onVoiceChange={setVoiceA}
+              onLangTypeChange={setLangTypeA}
+            />
+            <div style={s.selectorDivider}>↔</div>
+            <PersonSelector
+              color={COLORS.teal}
+              label="Person B"
+              lang={langB}
+              voice={voiceB}
+              langType={langTypeB}
+              onLangChange={(v) => { setLangB(v); setError(''); }}
+              onVoiceChange={setVoiceB}
+              onLangTypeChange={setLangTypeB}
+            />
+          </>
+        )}
       </div>
 
       {/* ── Conversation ── */}
       <div style={s.feed}>
         {messages.length === 0 && !processing && (
           <div style={s.empty}>
-            <div style={s.emptyOrb}>🗣️</div>
-            <p style={s.emptyTitle}>Ready to translate</p>
+            <div style={s.emptyOrb}>{remoteActive ? '📱' : '🗣️'}</div>
+            <p style={s.emptyTitle}>{remoteActive ? 'Ready — say something' : 'Ready to translate'}</p>
             <p style={s.emptySub}>
-              Hold <span style={{ color: COLORS.amber }}>Person A</span> or{' '}
-              <span style={{ color: COLORS.teal }}>Person B</span> button and speak.
-              <br />Release to hear the translation.
+              {remoteActive
+                ? peerState === 'connected'
+                  ? 'Hold the button and speak. Your partner will hear the translation.'
+                  : 'Waiting to connect to your partner…'
+                : <>
+                    Hold <span style={{ color: COLORS.amber }}>Person A</span> or{' '}
+                    <span style={{ color: COLORS.teal }}>Person B</span> button and speak.
+                    <br />Release to hear the translation.
+                  </>}
             </p>
           </div>
         )}
@@ -249,27 +589,41 @@ export default function App() {
 
       {/* ── Controls ── */}
       <div style={s.controls}>
-        <SpeakerButton
-          label={getLang(langA).native}
-          sub={getLang(langA).name}
-          color={COLORS.amber}
-          isRecording={recording === 'a'}
-          disabled={processing || recording === 'b'}
-          onStart={() => startRecording('a')}
-          onStop={() => stopRecording('a')}
-        />
+        {remoteActive ? (
+          <SpeakerButton
+            label={getLang(langA).native}
+            sub={getLang(langA).name}
+            color={COLORS.amber}
+            isRecording={recording === 'a'}
+            disabled={processing || peerState !== 'connected'}
+            onStart={() => startRecording('a')}
+            onStop={() => stopRecording('a')}
+          />
+        ) : (
+          <>
+            <SpeakerButton
+              label={getLang(langA).native}
+              sub={getLang(langA).name}
+              color={COLORS.amber}
+              isRecording={recording === 'a'}
+              disabled={processing || recording === 'b'}
+              onStart={() => startRecording('a')}
+              onStop={() => stopRecording('a')}
+            />
 
-        <div style={s.divider} />
+            <div style={s.divider} />
 
-        <SpeakerButton
-          label={getLang(langB).native}
-          sub={getLang(langB).name}
-          color={COLORS.teal}
-          isRecording={recording === 'b'}
-          disabled={processing || recording === 'a'}
-          onStart={() => startRecording('b')}
-          onStop={() => stopRecording('b')}
-        />
+            <SpeakerButton
+              label={getLang(langB).native}
+              sub={getLang(langB).name}
+              color={COLORS.teal}
+              isRecording={recording === 'b'}
+              disabled={processing || recording === 'a'}
+              onStart={() => startRecording('b')}
+              onStop={() => stopRecording('b')}
+            />
+          </>
+        )}
       </div>
     </div>
   );
@@ -277,16 +631,45 @@ export default function App() {
 
 // ─── Speaker Button ──────────────────────────────────────────────────────────
 // ─── Person Selector (language + voice) ──────────────────────────────────────
-function PersonSelector({ color, label, lang, voice, onLangChange, onVoiceChange }) {
+function PersonSelector({ color, label, lang, voice, langType, onLangChange, onVoiceChange, onLangTypeChange }) {
+  const langList = langType === 'intl' ? INTL_LANGUAGES : LANGUAGES;
+  const currentLangInList = langList.some((l) => l.code === lang);
+
+  // When switching type, default to first language of that type
+  const handleTypeChange = (type) => {
+    onLangTypeChange(type);
+    if (type === 'intl') onLangChange(INTL_LANGUAGES[0].code);
+    else onLangChange('hi-IN');
+  };
+
   return (
     <div style={s.personCol}>
       <div style={{ ...s.personLabel, color }}>{label}</div>
+
+      {/* Indian / International toggle */}
+      <div style={{ display: 'flex', gap: 3, marginBottom: 4 }}>
+        {[['indian', '🇮🇳 Indian'], ['intl', '🌍 Intl']].map(([type, lbl]) => (
+          <button
+            key={type}
+            style={{
+              ...s.typeToggleBtn,
+              background: langType === type ? color : 'transparent',
+              color: langType === type ? '#0C0B1A' : color,
+              borderColor: color,
+            }}
+            onClick={() => handleTypeChange(type)}
+          >
+            {lbl}
+          </button>
+        ))}
+      </div>
+
       <select
         style={{ ...s.langSelect, borderColor: color, color }}
-        value={lang}
+        value={currentLangInList ? lang : langList[0].code}
         onChange={(e) => onLangChange(e.target.value)}
       >
-        {LANGUAGES.map((l) => (
+        {langList.map((l) => (
           <option key={l.code} value={l.code}>{l.name} — {l.native}</option>
         ))}
       </select>
@@ -406,9 +789,88 @@ function MessageBubble({ msg }) {
   );
 }
 
+// ─── Remote Mode Pairing Modal ───────────────────────────────────────────────
+function RemoteModal({ mode, peerState, roomCode, joinCodeInput, remoteError, onSetMode, onJoinInputChange, onCreateRoom, onJoinRoom, onCancel }) {
+  return (
+    <div style={s.modalOverlay}>
+      <div style={s.modalCard}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h2 style={s.modalTitle}>Two-Phone Mode</h2>
+          <button style={s.gearBtn} onClick={onCancel}>✕</button>
+        </div>
+
+        {mode === 'choose' && (
+          <>
+            <p style={s.modalSub}>Each person uses their own phone. Both hear translations in their own language.</p>
+            <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+              <button style={{ ...s.modalActionBtn, borderColor: COLORS.amber, color: COLORS.amber }} onClick={onCreateRoom}>
+                Create Room
+              </button>
+              <button style={{ ...s.modalActionBtn, borderColor: COLORS.teal, color: COLORS.teal }} onClick={() => onSetMode('join')}>
+                Join Room
+              </button>
+            </div>
+          </>
+        )}
+
+        {mode === 'host' && (
+          <>
+            {peerState === 'hosting' && (
+              <>
+                <p style={s.modalSub}>Share this code with your partner:</p>
+                <div style={s.roomCode}>{roomCode}</div>
+                <p style={{ ...s.modalSub, marginTop: 12 }}>Waiting for partner to join…</p>
+                <div style={s.spinnerRow}><span style={s.spinner}>⏳</span></div>
+              </>
+            )}
+            {peerState === 'connected' && (
+              <p style={{ ...s.modalSub, color: '#4ade80' }}>Partner connected! Close this to start speaking.</p>
+            )}
+            {peerState === 'error' && (
+              <>
+                <p style={{ ...s.modalSub, color: '#FF7A7A' }}>{remoteError || 'Connection failed.'}</p>
+                <button style={{ ...s.modalActionBtn, borderColor: COLORS.amber, color: COLORS.amber, marginTop: 12 }} onClick={onCreateRoom}>Try Again</button>
+              </>
+            )}
+          </>
+        )}
+
+        {mode === 'join' && (
+          <>
+            <p style={s.modalSub}>Enter the 4-letter code from your partner's phone:</p>
+            <input
+              style={s.codeInput}
+              maxLength={4}
+              placeholder="ABCD"
+              value={joinCodeInput}
+              onChange={(e) => onJoinInputChange(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && onJoinRoom()}
+              autoFocus
+              autoCapitalize="characters"
+            />
+            {remoteError && <p style={{ color: '#FF7A7A', fontSize: '0.8rem', marginTop: 6 }}>{remoteError}</p>}
+            {peerState === 'joining' && <p style={{ ...s.modalSub, marginTop: 10 }}>Connecting…</p>}
+            {peerState === 'connected' && <p style={{ ...s.modalSub, color: '#4ade80', marginTop: 10 }}>Connected! Close this to start speaking.</p>}
+            {(peerState === 'idle' || peerState === 'error') && (
+              <button
+                style={{ ...s.modalActionBtn, borderColor: COLORS.teal, color: COLORS.teal, marginTop: 14, width: '100%' }}
+                onClick={onJoinRoom}
+                disabled={joinCodeInput.length < 4}
+              >
+                Join
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Setup / API Key Screen ──────────────────────────────────────────────────
-function SetupScreen({ onSave, existingKey }) {
+function SetupScreen({ onSave, existingKey, existingOaiKey }) {
   const [key, setKey] = useState(existingKey || '');
+  const [oaiKey, setOaiKey] = useState(existingOaiKey || '');
   const valid = key.trim().length > 20;
 
   return (
@@ -416,30 +878,43 @@ function SetupScreen({ onSave, existingKey }) {
       <div style={s.setupCard}>
         <div style={s.setupLogo}>𝕍</div>
         <h1 style={s.setupTitle}>VaakSetu</h1>
-        <p style={s.setupSub}>Bidirectional voice translator for Indian languages</p>
+        <p style={s.setupSub}>Bidirectional voice translator for Indian &amp; international languages</p>
 
         <div style={s.setupDivider} />
 
-        <label style={s.setupLabel}>Sarvam AI API Key</label>
+        <label style={s.setupLabel}>Sarvam AI API Key (Indian languages)</label>
         <input
           style={s.setupInput}
           type="password"
           placeholder="sk_…"
           value={key}
           onChange={(e) => setKey(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && valid && onSave(key.trim())}
           autoFocus
         />
         <p style={s.setupHint}>
-          Get your key at{' '}
           <a href="https://dashboard.sarvam.ai" target="_blank" rel="noreferrer" style={{ color: COLORS.amber }}>
             dashboard.sarvam.ai
           </a>
         </p>
 
+        <label style={{ ...s.setupLabel, marginTop: 12 }}>OpenAI API Key (international languages — optional)</label>
+        <input
+          style={s.setupInput}
+          type="password"
+          placeholder="sk-proj-…"
+          value={oaiKey}
+          onChange={(e) => setOaiKey(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && valid && onSave(key.trim(), oaiKey.trim())}
+        />
+        <p style={s.setupHint}>
+          <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer" style={{ color: COLORS.teal }}>
+            platform.openai.com
+          </a>
+        </p>
+
         <button
           style={{ ...s.setupBtn, opacity: valid ? 1 : 0.4, cursor: valid ? 'pointer' : 'default' }}
-          onClick={() => valid && onSave(key.trim())}
+          onClick={() => valid && onSave(key.trim(), oaiKey.trim())}
         >
           Start Translating →
         </button>
@@ -525,6 +1000,18 @@ const s = {
     cursor: 'pointer',
     outline: 'none',
     width: '100%',
+  },
+  typeToggleBtn: {
+    flex: 1,
+    border: '1px solid',
+    borderRadius: 6,
+    padding: '3px 5px',
+    fontSize: '0.65rem',
+    fontFamily: "'DM Sans', sans-serif",
+    cursor: 'pointer',
+    fontWeight: 700,
+    transition: 'all 0.15s',
+    whiteSpace: 'nowrap',
   },
   voiceToggle: {
     display: 'flex',
@@ -711,6 +1198,105 @@ const s = {
     border: '2px solid',
     animation: 'pulse-ring 1.2s ease-out infinite',
     pointerEvents: 'none',
+  },
+
+  // Remote connect button
+  remoteBtn: {
+    background: 'transparent',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 8,
+    color: COLORS.muted,
+    fontSize: '0.72rem',
+    fontFamily: "'DM Sans', sans-serif",
+    fontWeight: 600,
+    padding: '5px 10px',
+    cursor: 'pointer',
+    flexShrink: 0,
+  },
+  connectedBadge: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    fontSize: '0.68rem',
+    color: COLORS.muted,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 8,
+    padding: '4px 8px',
+  },
+
+  // Remote pairing modal
+  modalOverlay: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(12,11,26,0.88)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 100,
+    padding: 20,
+  },
+  modalCard: {
+    background: COLORS.surface,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 18,
+    padding: '24px 22px',
+    width: '100%',
+    maxWidth: 340,
+  },
+  modalTitle: {
+    fontFamily: "'Crimson Pro', serif",
+    fontSize: '1.3rem',
+    color: COLORS.text,
+    margin: 0,
+  },
+  modalSub: {
+    fontSize: '0.85rem',
+    color: COLORS.muted,
+    lineHeight: 1.55,
+    margin: 0,
+  },
+  modalActionBtn: {
+    flex: 1,
+    background: 'transparent',
+    border: '1.5px solid',
+    borderRadius: 10,
+    padding: '11px 14px',
+    fontSize: '0.9rem',
+    fontFamily: "'DM Sans', sans-serif",
+    fontWeight: 700,
+    cursor: 'pointer',
+    transition: 'opacity 0.15s',
+  },
+  roomCode: {
+    fontFamily: 'monospace',
+    fontSize: '2.6rem',
+    letterSpacing: '0.25em',
+    color: COLORS.amber,
+    fontWeight: 700,
+    textAlign: 'center',
+    padding: '16px 0 8px',
+  },
+  spinnerRow: {
+    display: 'flex',
+    justifyContent: 'center',
+    marginTop: 8,
+  },
+  spinner: { fontSize: '1.2rem' },
+  codeInput: {
+    display: 'block',
+    width: '100%',
+    textAlign: 'center',
+    padding: '12px',
+    background: COLORS.bg,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 10,
+    color: COLORS.amber,
+    fontSize: '1.8rem',
+    fontFamily: 'monospace',
+    letterSpacing: '0.3em',
+    fontWeight: 700,
+    marginTop: 12,
+    outline: 'none',
   },
 
   // Setup screen
