@@ -1,7 +1,7 @@
 # CLAUDE.md — Project Context for VaakSetu
 
 ## What is VaakSetu?
-VaakSetu (वाक् + सेतु = Voice Bridge) is a bidirectional real-time voice translator supporting Indian and international languages. Two people who don't speak each other's language can either share one device (two hold-to-talk buttons) or use separate phones connected via WebRTC (two-phone remote mode).
+VaakSetu (वाक् + सेतु = Voice Bridge) is a bidirectional real-time voice translator supporting Indian and international languages. Two people who don't speak each other's language can either share one device (two tap-to-speak buttons) or use separate phones connected via WebRTC (two-phone remote mode with optional hands-free live conversation).
 
 **Live:** https://vaak-setu.vercel.app
 
@@ -9,27 +9,25 @@ VaakSetu (वाक् + सेतु = Voice Bridge) is a bidirectional real-ti
 - **Frontend:** React + Vite (single-page app)
 - **Indian language APIs:** Sarvam AI (Saaras v3, Mayura, Bulbul v3)
 - **International language APIs:** OpenAI (Whisper, GPT-4o-mini, TTS-1)
+- **Streaming STT:** Sarvam WebSocket (`wss://api.sarvam.ai/speech-to-text/streaming`)
 - **WebRTC:** PeerJS (two-phone remote mode)
 - **Hosting:** Vercel (Mumbai region `bom1`) with serverless functions proxying both APIs
 - **Domain (planned):** vaaksetu.ai
 
 ## Sarvam AI Models (Indian languages)
-- **Saaras v3** (`saaras:v3`) — Speech-to-Text via `/speech-to-text`
+- **Saaras v3** (`saaras:v3`) — STT via `/speech-to-text` (batch) and WebSocket (streaming)
 - **Mayura** (`mayura:v1`) — Translation via `/translate`
 - **Bulbul v3** (`bulbul:v3`) — Text-to-Speech via `/text-to-speech`
 
 ## OpenAI Models (International languages)
-- **Whisper** (`whisper-1`) — STT via `/v1/audio/transcriptions` (transcribe) and `/v1/audio/translations` (→ English)
+- **Whisper** (`whisper-1`) — STT via `/v1/audio/transcriptions` and `/v1/audio/translations` (→ English)
 - **GPT-4o-mini** — Translation via `/v1/chat/completions`
-- **TTS-1** — Text-to-Speech via `/v1/audio/speech` (returns mp3 binary)
+- **TTS-1** — Text-to-Speech via `/v1/audio/speech` (returns mp3 binary → converted to base64)
 - Voices: **Male** → `onyx`, **Female** → `nova`
 
 ## Architecture — Dual Pipeline
 
 ### Sarvam pipeline (Indian ↔ Indian or Indian ↔ English)
-Mayura only supports English ↔ Indian language (not Indian ↔ Indian directly).
-All translations route through English as pivot:
-
 ```
 Indian lang speech → Saaras (mode="translate") → English text → Mayura (en→target) → Bulbul TTS
 English speech     → Saaras (mode="transcribe") → English text → Mayura (en→target) → Bulbul TTS
@@ -48,36 +46,100 @@ const useOpenAI = !isIndianLang(sourceLang) || !isIndianLang(targetLang);
 ```
 If either language in the pair is international → OpenAI pipeline. Otherwise → Sarvam pipeline.
 
+## Streaming STT (Sarvam WebSocket)
+
+### Why
+Eliminates the batch STT wait (~800ms). By streaming PCM audio while the user speaks, the transcript is ready by the time they stop. Only Translate → TTS remain (~0.9s vs ~1.7s before).
+
+### Protocol
+1. Connect: `wss://api.sarvam.ai/speech-to-text/streaming?api-subscription-key=KEY`
+2. Send config JSON: `{ model: "saaras:v3", mode, language_code }`
+3. Send binary: raw Int16 PCM, 16 kHz mono (via AudioWorklet)
+4. Receive JSON: `{ transcript, is_final }` — multiple partials then one final
+5. End: close WebSocket with code 1000 → triggers final transcript
+
+### Implementation (`src/api/sarvam-streaming.js`)
+- `SarvamStreamingSTT` class: `start(mediaStream)` → streams; `stop()` → returns `Promise<string>`
+- AudioWorklet processor loaded as Blob URL (no separate public/ file needed)
+- AudioContext forced to 16 kHz — browser resamples from native rate
+- `stop()` races final transcript vs 4s timeout (uses last partial on timeout)
+- Falls back to batch STT silently if WebSocket fails to connect
+
+### API key exposure
+The streaming WebSocket URL contains the API key as a query param — visible in browser devtools. This is an accepted trade-off for this project. Key is read from `import.meta.env.VITE_SARVAM_API_KEY` (set as a public Vercel env var).
+
+### Fast path in stopRecording
+```js
+if (pivotFromStream && !useOpenAI) {
+  // Skip STT call — streaming already gave us English pivot
+  result = await englishToSpeech({ pivotText: pivotFromStream, ... });
+}
+```
+
+### Live partial transcript
+While the user is speaking, streaming partial results appear in the feed as a dashed italic bubble — real-time visual feedback.
+
+### Browser support
+Requires `AudioWorkletNode` + `WebSocket` — Chrome, Safari 14.5+, Firefox 76+. Falls back to batch otherwise.
+
+## Conversation UX — Tap-to-Toggle + Silence Detection
+
+### Single device (solo mode)
+- Buttons are **tap-to-toggle**: tap once to start, tap again to stop early, OR just stop talking
+- **Silence detection** (amplitude VAD via Web Audio `AnalyserNode`) auto-stops after 1.5s of silence
+- Arms only after 400ms of actual speech (prevents instant-stop on hesitation)
+- Label: "Tap to Speak" → "Tap to Stop"
+
+### Two-phone remote mode
+- Same tap-to-toggle button for manual control
+- **"Go Live — hands-free"** button (shown when connected) enters continuous conversation mode:
+  - Starts listening automatically
+  - Silence detection stops recording → processes → plays translation
+  - After translation plays, listening restarts automatically (350ms gap)
+  - Status indicator shows: `● Listening` / `● Translating` / `● Ready`
+  - "Leave Conversation" exits back to manual tap mode
+
+### Silence detection implementation
+```js
+// Arms only after MIN_SPEECH_MS of detected speech
+// Fires stopRecording after SILENCE_MS of quiet
+const SILENCE_THRESHOLD = 10; // RMS amplitude (0–128 scale)
+const SILENCE_MS = 1500;
+const MIN_SPEECH_MS = 400;
+```
+Uses refs (`stopRecordingRef`, `startRecordingRef`, `autoConvRef`) to avoid stale closures in `setInterval` callbacks.
+
 ## Supported Languages
 
 ### Indian (Sarvam) — 11 languages
 Hindi (`hi-IN`), English (`en-IN`), Bengali (`bn-IN`), Gujarati (`gu-IN`), Kannada (`kn-IN`), Malayalam (`ml-IN`), Marathi (`mr-IN`), Odia (`or-IN`), Punjabi (`pa-IN`), Tamil (`ta-IN`), Telugu (`te-IN`)
 
-**Important:** Odia code is `or-IN` (not `od-IN`). Sarvam rejects `od-IN` with 400.
+**Important:** Odia code is `or-IN` (NOT `od-IN`). Sarvam rejects `od-IN` with 400. localStorage migration added.
 
 ### International (OpenAI) — 18 languages
-Spanish, French, German, Japanese, Chinese, Arabic, Portuguese, Russian, Italian, Korean, Dutch, Turkish, Polish, Swedish, Thai, Vietnamese, Indonesian, Ukrainian
+Spanish (`es`), French (`fr`), German (`de`), Japanese (`ja`), Chinese (`zh`), Arabic (`ar`), Portuguese (`pt`), Russian (`ru`), Italian (`it`), Korean (`ko`), Dutch (`nl`), Turkish (`tr`), Polish (`pl`), Swedish (`sv`), Thai (`th`), Vietnamese (`vi`), Indonesian (`id`), Ukrainian (`uk`)
 
-Each person has an **🇮🇳 Indian / 🌍 Intl toggle** in their language selector. Switching toggles changes the dropdown and routes to the appropriate pipeline.
+Each person has an **🇮🇳 Indian / 🌍 Intl toggle** in their language selector.
 
 ## Project Structure
 ```
 src/
-  App.jsx               — Main UI + state + pipeline routing
+  App.jsx               — Main UI + state + pipeline routing + VAD logic
   pipeline.js           — Sarvam pipeline + OpenAI pipeline functions
-  peer.js               — PeerJS helpers (generateRoomCode, hostPeerId, etc.)
+  peer.js               — PeerJS helpers (generateRoomCode, hostPeerId)
   api/
     sarvam.js           — Sarvam API wrappers + AudioContext playback
+    sarvam-streaming.js — WebSocket streaming STT (SarvamStreamingSTT class)
     openai.js           — OpenAI API wrappers (Whisper, GPT, TTS-1)
   main.jsx              — React entry point
 api/
-  speech-to-text.js     — Vercel proxy → Sarvam STT (multipart)
-  translate.js          — Vercel proxy → Sarvam Mayura
-  text-to-speech.js     — Vercel proxy → Sarvam Bulbul
-  openai-stt.js         — Vercel proxy → Whisper /transcriptions (multipart)
-  openai-stt-translate.js — Vercel proxy → Whisper /translations (→ English)
-  openai-chat.js        — Vercel proxy → GPT-4o-mini
-  openai-tts.js         — Vercel proxy → TTS-1 (returns raw mp3 binary)
+  speech-to-text.js         — Vercel proxy → Sarvam STT (multipart)
+  translate.js              — Vercel proxy → Sarvam Mayura
+  text-to-speech.js         — Vercel proxy → Sarvam Bulbul
+  openai-stt.js             — Vercel proxy → Whisper /transcriptions
+  openai-stt-translate.js   — Vercel proxy → Whisper /translations (→ English)
+  openai-chat.js            — Vercel proxy → GPT-4o-mini
+  openai-tts.js             — Vercel proxy → TTS-1 (returns raw mp3 binary)
 index.html              — HTML entry with fonts (Crimson Pro + DM Sans)
 vite.config.js          — Dev proxies (/sarvam → api.sarvam.ai, /openai → api.openai.com)
 vercel.json             — Region bom1 (Mumbai) + framework Vite
@@ -90,185 +152,186 @@ vercel.json             — Region bom1 (Mumbai) + framework Vite
 ### Dev
 - Vite proxies `/sarvam/*` → `https://api.sarvam.ai/*`
 - Vite proxies `/openai/*` → `https://api.openai.com/*`
-- Keys read from `.env` (`VITE_SARVAM_API_KEY`, `VITE_OPENAI_API_KEY`) or localStorage (setup screen)
+- Keys from `.env` (`VITE_SARVAM_API_KEY`, `VITE_OPENAI_API_KEY`) or localStorage (setup screen)
 
 ### Production (Vercel)
-- **No browser-side API keys.** Setup screen hidden in prod.
 - Serverless functions inject `SARVAM_API_KEY` and `OPENAI_API_KEY` from Vercel env vars
-- Functions deployed in `bom1` (Mumbai) region for minimum latency to Sarvam
+- Streaming WebSocket uses `VITE_SARVAM_API_KEY` (public env var, embedded in JS bundle)
+- Setup screen hidden in prod
 
 ### Vercel env vars required
 ```bash
-vercel env add SARVAM_API_KEY production
-vercel env add OPENAI_API_KEY production
+vercel env add SARVAM_API_KEY production        # for serverless function proxies
+vercel env add VITE_SARVAM_API_KEY production   # for WebSocket streaming (public, in bundle)
+vercel env add OPENAI_API_KEY production        # for OpenAI serverless proxies
 ```
 
-## OpenAI TTS audio handling
-OpenAI TTS returns raw mp3 binary (not base64). The `openai-tts.js` Vercel proxy returns it as binary. The `openaiTTS()` function in `src/api/openai.js` fetches the ArrayBuffer and converts to base64 with `arrayBufferToBase64()` so it's compatible with the existing `playBase64Audio()` function in `sarvam.js`. This means replay works identically for both pipelines — messages always store `audioB64`.
+## Audio Recording & Playback
+
+### Recording — MediaRecorder (fallback / batch path)
+- MIME: `audio/mp4` preferred (iOS), falls back to `audio/webm`
+- Strip `;codecs=...` suffix before creating Blob — Sarvam rejects `audio/mp4;codecs=opus`
+- Filename extension matches MIME (`audio.m4a` for mp4, `audio.webm` for webm)
+- `getUserMedia` called **synchronously** in user gesture (iOS Safari requirement)
+- Min blob size 1000 bytes — rejects accidental taps
+
+### Recording — AudioWorklet (streaming path)
+- Raw Int16 PCM at 16 kHz via `AudioWorkletNode`
+- Processor loaded as Blob URL (self-contained, no public/ file)
+- Streams to WebSocket while user speaks; MediaRecorder runs in parallel as backup
+- Both stopped simultaneously via `Promise.all` in `stopRecording`
+
+### Playback — AudioContext
+- `playBase64Audio` uses `decodeAudioData` + `createBufferSource` (not `<audio>` element)
+- Works for both Sarvam WAV and OpenAI MP3 (both decoded by WebAudio)
+- OpenAI TTS ArrayBuffer → `arrayBufferToBase64()` in `openai.js` → same `playBase64Audio` path
+- `unlockAudio()` called synchronously in every user gesture for iOS Safari autoplay
 
 ## Voices
 
-### Sarvam (Bulbul v3) — Indian languages
-- Male → `anand`, Female → `ritu`
-- Available speakers (lowercase required): anushka, abhilash, manisha, vidya, arya, karun, hitesh, aditya, ritu, priya, neha, rahul, pooja, rohan, simran, kavya, amit, dev, ishita, shreya, ratan, varun, manan, sumit, roopa, kabir, aayan, shubh, ashutosh, advait, anand, tanya, tarun, sunny, mani, gokul, vijay, shruti, suhani, mohit, kavitha, rehan, soham, rupali
+### Sarvam (Bulbul v3) — Indian
+- Male → `anand`, Female → `ritu` (lowercase required)
 
-### OpenAI (TTS-1) — International languages
+### OpenAI (TTS-1) — International
 - Male → `onyx`, Female → `nova`
 
-### Voice UX model — **Listener's preference**
-Each person's voice toggle = the voice they want to *hear* translations in. When Person A speaks, Person B is the listener, so Person B's voice preference is used. Avoids confusion where a speaker sets their own voice but never hears it.
+### Voice UX model — Listener's preference
+Listener's voice preference is used (not the speaker's). When A speaks, B hears the output → B's voice setting applied. Avoids speaker never hearing their own voice.
 
 Defaults: Person A → male, Person B → female.
 localStorage keys: `vs_langA`, `vs_langB`, `vs_voiceA`, `vs_voiceB`, `vs_ltypeA`, `vs_ltypeB`
 
 ## Two-Phone Remote Mode (WebRTC via PeerJS)
 
-### Architecture
-- Uses PeerJS (public signaling server) for WebRTC data channel
-- Room code: 4-letter code from consonants (`BCDFGHJKMNPQRSTVWXYZ`), prefixed `vaaksetu-XXXX` as PeerJS ID
-- Each phone handles its own pipeline independently — only English pivot text is sent over the wire
+### Flow
+1. Host: "Create Room" → 4-letter code → waits
+2. Guest: "Join Room" → enters code → connects
+3. Each phone speaks → STT → English pivot sent over data channel
+4. Receiver → Mayura/GPT → TTS in their language/voice
+5. Optional: "Go Live" for hands-free continuous conversation
 
-### Message schema (data channel)
+### Message schema
 ```js
-{ type: 'hello', lang: 'hi-IN', voice: 'male' }   // sent on connect + on lang/voice change
-{ type: 'english', text: '...', sourceLang: 'hi-IN', ts: 12345 }  // utterance from partner
+{ type: 'hello', lang: 'hi-IN', voice: 'male' }                         // on connect + lang change
+{ type: 'english', text: '...', sourceLang: 'hi-IN', ts: 12345 }        // utterance
 ```
 
-### Flow
-1. Host phone: "Create Room" → generates code → waits for peer connection
-2. Guest phone: "Join Room" → enters 4-letter code → connects
-3. Each phone speaks → STT → English pivot → sent over data channel
-4. Receiver gets English text → Mayura/GPT → TTS in their own language/voice
-
-### Routing in remote mode
-- If sender's `langA` is Indian → `speechToEnglish()` (Sarvam)
-- If sender's `langA` is international → `openaiSpeechToEnglishPipeline()` (Whisper)
-- If receiver's `langA` is Indian → `englishToSpeech()` (Sarvam)
-- If receiver's `langA` is international → `openaiEnglishToSpeech()` (OpenAI)
+### Pipeline routing in remote mode
+- Sender Indian lang → `speechToEnglish()` (Sarvam) or streaming STT
+- Sender intl lang → `openaiSpeechToEnglishPipeline()` (Whisper)
+- Receiver Indian lang → `englishToSpeech()` (Sarvam)
+- Receiver intl lang → `openaiEnglishToSpeech()` (OpenAI)
 
 ### peerState values
-`'idle'` → `'hosting'`/`'joining'` → `'connected'` | `'error'`
+`'idle'` → `'hosting'` | `'joining'` → `'connected'` | `'error'`
 
-## Audio Recording & Playback (browser gotchas)
-
-### Recording — MediaRecorder
-- MIME type chosen dynamically: `audio/mp4` preferred (iOS), falls back to `audio/webm` (Chrome/Android)
-- `MediaRecorder.isTypeSupported()` gates selection
-- **Strip codec suffix** from `mediaRecorder.mimeType` before creating Blob — Sarvam rejects `audio/mp4;codecs=opus` but accepts `audio/mp4`
-- Filename extension in the form part matches the Blob MIME (`audio.m4a` for mp4, `audio.webm` for webm)
-- `getUserMedia` must be called **synchronously within the user gesture** for iOS Safari — never `await` before it
-- Minimum blob size check (1000 bytes) to reject accidental taps
-
-### Playback — AudioContext (iOS Safari autoplay)
-- iOS Safari blocks `new Audio(...).play()` unless triggered directly by a user gesture
-- Fix: module-level `AudioContext` created and `resume()`d inside `unlockAudio()`, called synchronously on every button press
-- `playBase64Audio` uses `ctx.decodeAudioData` + `ctx.createBufferSource()` instead of `<audio>` element
-- Both Sarvam (WAV base64) and OpenAI (MP3 base64) use the same `playBase64Audio` function — WebAudio decodes both formats
+### Room codes
+4-letter codes from consonants only (`BCDFGHJKMNPQRSTVWXYZ`). PeerJS ID prefixed `vaaksetu-XXXX`.
 
 ## UI Design
-- Dark theme: deep indigo (`#0C0B1A`) background
-- Person A accent: amber (`#F5A623`)
-- Person B accent: teal (`#0FB8A9`)
+- Dark theme: `#0C0B1A` background, Person A amber `#F5A623`, Person B teal `#0FB8A9`
 - Fonts: Crimson Pro (headers), DM Sans (body)
-- Top bar: logo + "📱 Two Phones" button + gear icon (dev only)
-- Selector row: per-person Indian/Intl toggle + language dropdown + Male/Female voice toggle
-- Hold-to-talk buttons with pulse ring animation while recording
-- Remote mode modal: Create Room (shows 4-letter code) / Join Room (input code)
+- Top bar: logo + "📱 Two Phones" + gear (dev only)
+- Selector row: per-person 🇮🇳/🌍 toggle + language dropdown + Male/Female voice toggle
+- Conversation feed: message bubbles + live partial transcript (dashed italic, streaming)
+- Controls: tap-to-toggle mic buttons (solo) or Live Mode indicator (remote hands-free)
+- Remote pairing modal: Create Room (shows code) / Join Room (input code)
 
 ## Features Implemented
-- [x] Hold-to-talk recording (Person A / Person B)
+- [x] Tap-to-toggle recording (replaces hold-to-talk)
+- [x] Amplitude VAD silence detection (auto-stops after 1.5s quiet + 400ms speech)
+- [x] Streaming STT via Sarvam WebSocket (AudioWorklet → PCM → WS)
+- [x] Live partial transcript display while speaking
 - [x] Full STT → Translate → TTS pipeline (Sarvam for Indian, OpenAI for international)
-- [x] Independent language selectors for Person A and Person B
-- [x] 🇮🇳 Indian / 🌍 Intl toggle per person (routes to Sarvam or OpenAI pipeline)
-- [x] 11 Indian languages (Sarvam) + 18 international languages (OpenAI)
+- [x] 🇮🇳 Indian / 🌍 Intl toggle per person (11 Indian + 18 international languages)
 - [x] Male / Female voice toggle per person (listener's preference model)
 - [x] Preferences persist in localStorage
-- [x] Conversation feed with message bubbles
+- [x] Conversation feed with message bubbles + replay button
 - [x] English pivot text shown as secondary transcript
 - [x] Auto-scroll to latest message
 - [x] API key setup screen (dev only — Sarvam + OpenAI keys)
-- [x] Error handling and display (with specific iOS-mic guidance)
-- [x] Replay button on each message bubble
+- [x] Error handling (iOS-specific mic guidance)
 - [x] Processing status indicator with step icons
 - [x] Vercel production deployment with serverless API proxy
-- [x] Server-side API keys (no browser exposure in production)
-- [x] Audio format compatibility for iOS Safari (mp4) and Chrome (webm)
+- [x] Server-side API keys (no browser exposure except streaming key)
+- [x] Audio format compatibility (iOS mp4, Chrome webm)
 - [x] Two-phone remote mode via PeerJS WebRTC data channel
-- [x] Room code pairing (4-letter code, host/guest flow)
+- [x] Room code pairing (4-letter, host/guest flow)
+- [x] Go Live — hands-free continuous conversation mode (two-phone)
 
-## Latency Optimizations
+## Latency Profile
 
-Target: keep perceived latency under ~2s.
+| Step | Before streaming | After streaming |
+|------|-----------------|-----------------|
+| STT | ~800ms (batch) | ~0ms (already done) |
+| Translate | ~400ms | ~400ms |
+| TTS | ~500ms | ~500ms |
+| **Total after stop** | **~1.7s** | **~0.9s** |
 
-Applied:
-- **Vercel region `bom1` (Mumbai)** — closest to Sarvam's India-based API
-- **Show text immediately** — `onText` callback renders message bubble before TTS completes
-- **Pre-warm TCP connection** — HEAD fetch to `/api/speech-to-text` on button press
+Additional optimisations in place:
+- Vercel `bom1` (Mumbai) — closest region to Sarvam
+- `onText` callback renders message bubble before TTS completes
+- HEAD pre-warm fetch on button press
 
 Pending:
-- [ ] Downsample audio to 16kHz mono before upload (~60% smaller payload)
-- [ ] Cache TTS audio for common short phrases
-- [ ] Stream TTS playback (blocked by Sarvam — no streaming API today)
+- [ ] Downsample audio to 16kHz mono for batch path (~60% smaller payload)
+- [ ] Cache TTS for common short phrases
 
-## Planned Enhancements
-- [ ] Register `vaaksetu.ai` domain and point to Vercel
-- [ ] iOS app via Expo / React Native
-- [ ] Auto-detect source language
-- [ ] Live waveform visualizer during recording
-- [ ] Clear conversation / reset button
-- [ ] Copy transcript text
-- [ ] Latency timer per message
-- [ ] Mute TTS (text-only mode)
-- [ ] Fix STT 400 issue on receiver phone in remote mode (full error text needed for diagnosis)
+## Known Issues / Pending
+- [ ] STT 400 error on receiver phone in remote mode — need full error text body to diagnose
+- [ ] Streaming STT Sarvam protocol assumptions (config format, field names) need validation against actual Sarvam docs once available
+- [ ] Two-phone Go Live: auto-restart timing (350ms gap) may need tuning per device
 
 ## Deployment
 
 ### Vercel
 ```bash
-vercel              # first-time: creates project
 vercel env add SARVAM_API_KEY production
+vercel env add VITE_SARVAM_API_KEY production   # same key — needed for WebSocket streaming
 vercel env add OPENAI_API_KEY production
-vercel --prod       # deploy to production
+vercel --prod
 ```
 
 ### Local dev
 ```bash
-npm run dev                 # localhost:5173
-npm run dev -- --host       # expose on LAN (HTTPS via self-signed cert)
-npm run build               # production build → dist/
+npm run dev               # localhost:5173
+npm run dev -- --host     # LAN HTTPS (self-signed cert)
+npm run build             # production build → dist/
 ```
 
-Add to `.env`:
+`.env` file:
 ```
 VITE_SARVAM_API_KEY=sk_...
 VITE_OPENAI_API_KEY=sk-proj-...
 ```
 
-To test on phone via LAN: `npm run dev -- --host`, open `https://<your-ip>:5173`, accept self-signed cert warning. Microphone requires HTTPS on iOS Safari.
-
 ## Business Context
+- Sarvam models outperform Google Translate for Indian languages — key differentiator
+- Moat: vertical SaaS (hospitals/courts/banks), hardware device, or proprietary conversation data
+- Current phase: MVP web app for validation
+- Recommended next step: 5-10 paying customers in one vertical (healthcare or banking)
 
-- **Insight:** Indian language translation is underserved by big tech; Sarvam models significantly outperform Google Translate for Indian languages
-- **Moat thinking:** A thin wrapper over APIs is not defensible. Real moat comes from (a) vertical SaaS (hospitals/banks/courts), (b) hardware device (pocket translator / badge), or (c) domain-specific fine-tuning with proprietary conversation data
-- **Current phase:** MVP web app as validation tool before committing to iOS/hardware
-- **Recommended next step:** validate with 5-10 paying customers in one vertical (healthcare or banking field agents are strongest bets)
+## Session History & Decisions
 
-## Session History & Decisions (notable)
-
-- Switched from fixed language pairs to independent Person A / Person B dropdowns
-- Chose **listener's voice preference** model — speaker never hears their own voice, so listener's preference makes more UX sense
-- Serverless API proxy in production: users never see or supply API keys
-- `@vitejs/plugin-basic-ssl` added for LAN phone testing → Vite 5 peer-dep conflict → fixed with `.npmrc legacy-peer-deps=true`
-- iOS Safari debugging: mic permission → audio format (codec strip) → AudioContext autoplay policy (all resolved)
-- Odia language code bug: our app was sending `od-IN` but Sarvam requires `or-IN` → fixed, added localStorage migration
-- Added WebRTC two-phone mode (PeerJS): each phone runs its own pipeline, only English pivot text crosses the wire
-- Added international language support (18 languages) via OpenAI (Whisper + GPT-4o-mini + TTS-1); dual-pipeline routing based on whether either language is non-Indian
-- OpenAI TTS returns raw mp3 binary; converted to base64 in `openaiTTS()` so `playBase64Audio()` works identically for both pipelines
+- Fixed language pairs → independent per-person dropdowns
+- Listener's voice preference model (speaker never hears own voice)
+- Serverless API proxy in prod — no user key exposure (except streaming WS)
+- `.npmrc legacy-peer-deps=true` for Vite 5 vs @vitejs/plugin-basic-ssl conflict
+- iOS Safari: sync getUserMedia, codec strip, AudioContext unlock — all resolved
+- Odia code bug: `od-IN` → `or-IN`, with localStorage migration
+- Added WebRTC two-phone mode (PeerJS, English pivot over data channel)
+- Added 18 international languages via OpenAI dual-pipeline
+- OpenAI TTS returns binary mp3 → base64 in client, reuses `playBase64Audio`
+- Hold-to-talk → tap-to-toggle + amplitude VAD (1.5s silence auto-stop)
+- Added Go Live hands-free mode for two-phone: VAD loop with auto-restart after TTS
+- Sarvam announced WebSocket streaming STT + batch job API; implemented streaming
+- Streaming uses AudioWorklet Blob URL (no public/ file needed), 16kHz PCM
+- Key exposure accepted for WebSocket URL; VITE_SARVAM_API_KEY as public Vercel env var
 
 ## Commands
 ```bash
 npm run dev               # dev server (localhost:5173)
-npm run dev -- --host     # expose on LAN (HTTPS via self-signed cert)
+npm run dev -- --host     # LAN HTTPS
 npm run build             # production build
 vercel --prod             # deploy to production
 ```

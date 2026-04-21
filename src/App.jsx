@@ -93,12 +93,17 @@ export default function App() {
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
   const conversationEndRef = useRef(null);
-  const streamingSTTRef = useRef(null); // SarvamStreamingSTT instance
+  const streamingSTTRef = useRef(null);
+  const silenceDetectorRef = useRef(null); // { interval, audioCtx }
+  const stopRecordingRef = useRef(null);   // always-current ref for use inside callbacks
+  const startRecordingRef = useRef(null);  // always-current ref for auto-restart
+  const autoConvRef = useRef(false);       // mirrors autoConversation state for closure safety
 
   // Key used for WebSocket streaming — must be client-side (visible in devtools)
   const streamKey = import.meta.env.VITE_SARVAM_API_KEY || apiKey;
 
   const [partialTranscript, setPartialTranscript] = useState('');
+  const [autoConversation, setAutoConversation] = useState(false);
   const peerRef = useRef(null);
   const connRef = useRef(null);
   const partnerHandlerRef = useRef(null);
@@ -132,25 +137,95 @@ export default function App() {
     setShowSetup(false);
   };
 
-  const startRecording = useCallback((speaker) => {
-    if (processing || recording) return;
-    setError('');
+  // Keep always-current refs so setTimeout/setInterval callbacks see fresh functions
+  useEffect(() => { stopRecordingRef.current = stopRecording; });
+  useEffect(() => { startRecordingRef.current = startRecording; });
 
+  const clearSilenceDetector = useCallback(() => {
+    if (silenceDetectorRef.current) {
+      clearInterval(silenceDetectorRef.current.interval);
+      silenceDetectorRef.current.audioCtx?.close().catch(() => {});
+      silenceDetectorRef.current = null;
+    }
+  }, []);
+
+  // Amplitude-based VAD: fires stopRecording after SILENCE_MS of quiet following speech
+  const startSilenceDetection = useCallback((speaker, stream) => {
+    clearSilenceDetector();
+    const SILENCE_THRESHOLD = 10; // RMS on 0–128 scale
+    const SILENCE_MS = 1500;
+    const MIN_SPEECH_MS = 400;   // ignore silence until this much speech recorded
+    const TICK = 100;
+
+    const audioCtx = new AudioContext();
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+    const data = new Uint8Array(analyser.fftSize);
+
+    let speechMs = 0;
+    let silenceMs = 0;
+
+    const interval = setInterval(() => {
+      analyser.getByteTimeDomainData(data);
+      const rms = Math.sqrt(data.reduce((s, v) => s + (v - 128) ** 2, 0) / data.length);
+
+      if (rms >= SILENCE_THRESHOLD) {
+        speechMs += TICK;
+        silenceMs = 0;
+      } else {
+        silenceMs += TICK;
+        if (speechMs >= MIN_SPEECH_MS && silenceMs >= SILENCE_MS) {
+          clearInterval(interval);
+          audioCtx.close().catch(() => {});
+          silenceDetectorRef.current = null;
+          stopRecordingRef.current?.(speaker);
+        }
+      }
+    }, TICK);
+
+    silenceDetectorRef.current = { interval, audioCtx };
+  }, [clearSilenceDetector]);
+
+  // Two-phone: start continuous hands-free conversation
+  const startAutoConversation = useCallback(() => {
+    setAutoConversation(true);
+    autoConvRef.current = true;
+    startRecordingRef.current?.('a');
+  }, []);
+
+  const stopAutoConversation = useCallback(() => {
+    setAutoConversation(false);
+    autoConvRef.current = false;
+    clearSilenceDetector();
+    // stopRecording will no-op if not currently recording
+    stopRecordingRef.current?.('a');
+  }, [clearSilenceDetector]);
+
+  const startRecording = useCallback((speaker) => {
+    if (processing) return;
+
+    // Tap-to-toggle: if already recording same speaker, stop
+    if (recording === speaker) {
+      clearSilenceDetector();
+      stopRecordingRef.current?.(speaker);
+      return;
+    }
+    if (recording) return; // other speaker is recording
+
+    setError('');
     if (!navigator.mediaDevices?.getUserMedia) {
       setError('Microphone not supported on this browser. Try Safari 14.3+ or Chrome.');
       return;
     }
 
-    unlockAudio(); // must be called synchronously within user gesture for iOS Safari
-
-    // Pre-warm TCP/TLS connection to the API while user is still speaking
+    unlockAudio();
     const warmBase = import.meta.env.DEV ? '/sarvam/speech-to-text' : '/api/speech-to-text';
     fetch(warmBase, { method: 'HEAD' }).catch(() => {});
 
     navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
       streamRef.current = stream;
 
-      // MediaRecorder — kept as fallback if WebSocket streaming fails
       const mimeType = ['audio/mp4', 'audio/webm', ''].find(
         (t) => t === '' || MediaRecorder.isTypeSupported(t)
       );
@@ -160,7 +235,7 @@ export default function App() {
       recorder.start(100);
       mediaRecRef.current = recorder;
 
-      // Streaming STT — Indian languages only, when API key is available
+      // Streaming STT (Indian languages only)
       const sourceLang = remoteActive ? langA : (speaker === 'a' ? langA : langB);
       const canStream = supportsStreamingSTT() && isIndianLang(sourceLang) && streamKey;
       if (canStream) {
@@ -171,12 +246,12 @@ export default function App() {
           mode: sttMode,
           onPartial: (text) => setPartialTranscript(text),
         });
-        streamer.start(stream).catch(() => {
-          // Streaming failed to connect — fall back to batch silently
-          streamingSTTRef.current = null;
-        });
+        streamer.start(stream).catch(() => { streamingSTTRef.current = null; });
         streamingSTTRef.current = streamer;
       }
+
+      // Silence detection — auto-stops recording after speech + pause
+      startSilenceDetection(speaker, stream);
 
       setRecording(speaker);
     }).catch((err) => {
@@ -188,7 +263,7 @@ export default function App() {
         setError(`Microphone error: ${err.name} — ${err.message}`);
       }
     });
-  }, [processing, recording]);
+  }, [processing, recording, remoteActive, langA, langB, streamKey, clearSilenceDetector, startSilenceDetection]);
 
   // ── Remote mode: incoming message from partner (English pivot → local TTS) ──
   const handlePartnerMessage = useCallback(async (msg) => {
@@ -356,6 +431,7 @@ export default function App() {
   const stopRecording = useCallback(async (speaker) => {
     if (!mediaRecRef.current || recording !== speaker) return;
 
+    clearSilenceDetector();
     setRecording(null);
     setProcessing(true);
     setPartialTranscript('');
@@ -483,13 +559,24 @@ export default function App() {
       }
 
       setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, audioB64: result.audioB64 } : m));
+
+      // Auto-restart for two-phone live conversation mode
+      result.audioPromise?.then(() => {
+        if (autoConvRef.current && peerState === 'connected') {
+          setTimeout(() => startRecordingRef.current?.('a'), 350);
+        }
+      });
     } catch (err) {
       setError(err.message);
       setProcessing(false);
       setStepId('');
       setStepMsg('');
+      // Even on error, keep live mode going
+      if (autoConvRef.current && peerState === 'connected') {
+        setTimeout(() => startRecordingRef.current?.('a'), 800);
+      }
     }
-  }, [recording, remoteActive, langA, langB, voiceA, voiceB, apiKey, openaiKey, streamKey]);
+  }, [recording, remoteActive, langA, langB, voiceA, voiceB, apiKey, openaiKey, streamKey, clearSilenceDetector, peerState]);
 
   if (showSetup) {
     return <SetupScreen onSave={handleSaveKey} existingKey={apiKey} existingOaiKey={openaiKey} />;
@@ -606,9 +693,11 @@ export default function App() {
             <p style={s.emptyTitle}>{remoteActive ? 'Ready — say something' : 'Ready to translate'}</p>
             <p style={s.emptySub}>
               {remoteActive
-                ? peerState === 'connected'
-                  ? 'Hold the button and speak. Your partner will hear the translation.'
-                  : 'Waiting to connect to your partner…'
+                ? autoConversation
+                  ? 'Go ahead — speak when ready. Silence will trigger translation automatically.'
+                  : peerState === 'connected'
+                    ? 'Tap the button to speak, or tap "Go Live" for hands-free mode.'
+                    : 'Waiting to connect to your partner…'
                 : <>
                     Hold <span style={{ color: COLORS.amber }}>Person A</span> or{' '}
                     <span style={{ color: COLORS.teal }}>Person B</span> button and speak.
@@ -650,15 +739,25 @@ export default function App() {
       {/* ── Controls ── */}
       <div style={s.controls}>
         {remoteActive ? (
-          <SpeakerButton
-            label={getLang(langA).native}
-            sub={getLang(langA).name}
-            color={COLORS.amber}
-            isRecording={recording === 'a'}
-            disabled={processing || peerState !== 'connected'}
-            onStart={() => startRecording('a')}
-            onStop={() => stopRecording('a')}
-          />
+          autoConversation ? (
+            <LiveModeIndicator onLeave={stopAutoConversation} isRecording={!!recording} processing={processing} />
+          ) : (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: '20px 12px' }}>
+              <SpeakerButton
+                label={getLang(langA).native}
+                sub={getLang(langA).name}
+                color={COLORS.amber}
+                isRecording={recording === 'a'}
+                disabled={processing || peerState !== 'connected'}
+                onToggle={() => startRecording('a')}
+              />
+              {peerState === 'connected' && (
+                <button style={s.goLiveBtn} onClick={startAutoConversation}>
+                  🎙 Go Live — hands-free
+                </button>
+              )}
+            </div>
+          )
         ) : (
           <>
             <SpeakerButton
@@ -667,8 +766,7 @@ export default function App() {
               color={COLORS.amber}
               isRecording={recording === 'a'}
               disabled={processing || recording === 'b'}
-              onStart={() => startRecording('a')}
-              onStop={() => stopRecording('a')}
+              onToggle={() => startRecording('a')}
             />
 
             <div style={s.divider} />
@@ -679,8 +777,7 @@ export default function App() {
               color={COLORS.teal}
               isRecording={recording === 'b'}
               disabled={processing || recording === 'a'}
-              onStart={() => startRecording('b')}
-              onStop={() => stopRecording('b')}
+              onToggle={() => startRecording('b')}
             />
           </>
         )}
@@ -753,14 +850,13 @@ function PersonSelector({ color, label, lang, voice, langType, onLangChange, onV
   );
 }
 
-function SpeakerButton({ label, sub, color, isRecording, disabled, onStart, onStop }) {
+function SpeakerButton({ label, sub, color, isRecording, disabled, onToggle }) {
   return (
     <div style={s.speakerWrap}>
       <p style={{ ...s.speakerLabel, color }}>{label}</p>
-      <p style={s.speakerSub}>{sub}</p>
+      <p style={s.speakerSub}>{isRecording ? 'Listening…' : sub}</p>
 
       <div style={{ position: 'relative' }}>
-        {/* Pulse ring while recording */}
         {isRecording && (
           <>
             <div style={{ ...s.pulseRing, borderColor: color, animationDelay: '0s' }} />
@@ -778,16 +874,12 @@ function SpeakerButton({ label, sub, color, isRecording, disabled, onStart, onSt
             transform: isRecording ? 'scale(1.08)' : 'scale(1)',
             boxShadow: isRecording ? `0 0 28px ${color}60` : `0 0 0px transparent`,
           }}
-          onMouseDown={(e) => { e.preventDefault(); if (!disabled) onStart(); }}
-          onMouseUp={(e) => { e.preventDefault(); onStop(); }}
-          onMouseLeave={(e) => { e.preventDefault(); if (isRecording) onStop(); }}
-          onTouchStart={(e) => { e.preventDefault(); if (!disabled) onStart(); }}
-          onTouchEnd={(e) => { e.preventDefault(); onStop(); }}
+          onClick={() => { if (!disabled || isRecording) onToggle(); }}
           disabled={disabled && !isRecording}
         >
           <span style={{ fontSize: '1.8rem', lineHeight: 1 }}>{isRecording ? '⏹' : '🎤'}</span>
           <span style={s.micBtnLabel}>
-            {isRecording ? 'Recording…' : 'Hold to Speak'}
+            {isRecording ? 'Tap to Stop' : 'Tap to Speak'}
           </span>
         </button>
       </div>
@@ -845,6 +937,22 @@ function MessageBubble({ msg }) {
       )}
 
       <div style={s.bubbleMain}>{msg.translatedText}</div>
+    </div>
+  );
+}
+
+// ─── Live Mode Controls (two-phone hands-free) ───────────────────────────────
+function LiveModeIndicator({ onLeave, isRecording, processing }) {
+  return (
+    <div style={s.liveModeWrap}>
+      <div style={s.liveStatusRow}>
+        <span style={{ ...s.liveDot, color: isRecording ? COLORS.amber : processing ? COLORS.teal : '#4ade80' }}>●</span>
+        <span style={s.liveLabel}>
+          {isRecording ? 'Listening…' : processing ? 'Translating…' : 'Ready'}
+        </span>
+      </div>
+      <p style={s.liveHint}>Speak naturally — silence triggers translation automatically</p>
+      <button style={s.leaveBtn} onClick={onLeave}>Leave Conversation</button>
     </div>
   );
 }
@@ -1285,6 +1393,66 @@ const s = {
     border: '2px solid',
     animation: 'pulse-ring 1.2s ease-out infinite',
     pointerEvents: 'none',
+  },
+
+  // Go Live button
+  goLiveBtn: {
+    background: `${COLORS.amber}18`,
+    border: `1.5px solid ${COLORS.amber}`,
+    borderRadius: 24,
+    color: COLORS.amber,
+    fontSize: '0.85rem',
+    fontFamily: "'DM Sans', sans-serif",
+    fontWeight: 700,
+    padding: '10px 24px',
+    cursor: 'pointer',
+    letterSpacing: '0.02em',
+    transition: 'all 0.15s',
+  },
+
+  // Live mode (hands-free) indicator panel
+  liveModeWrap: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    padding: '24px 20px',
+  },
+  liveStatusRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+  },
+  liveDot: {
+    fontSize: '1rem',
+    transition: 'color 0.3s ease',
+  },
+  liveLabel: {
+    fontSize: '1.1rem',
+    fontFamily: "'Crimson Pro', serif",
+    color: COLORS.text,
+    fontWeight: 600,
+  },
+  liveHint: {
+    fontSize: '0.8rem',
+    color: COLORS.muted,
+    textAlign: 'center',
+    maxWidth: 260,
+    lineHeight: 1.5,
+    margin: 0,
+  },
+  leaveBtn: {
+    background: 'transparent',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 10,
+    color: COLORS.muted,
+    fontSize: '0.8rem',
+    fontFamily: "'DM Sans', sans-serif",
+    padding: '8px 18px',
+    cursor: 'pointer',
+    marginTop: 4,
   },
 
   // Remote connect button
