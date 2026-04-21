@@ -58,6 +58,12 @@ const VOICES = {
 
 const STEP_ICONS = { stt: '🎤', translate: '🔄', tts: '🔊', playing: '▶️', done: '' };
 
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+];
+
 // ─── Root App ────────────────────────────────────────────────────────────────
 export default function App() {
   const isProd = import.meta.env.PROD;
@@ -189,6 +195,7 @@ export default function App() {
 
   // Two-phone: start continuous hands-free conversation
   const startAutoConversation = useCallback(() => {
+    unlockAudio(); // must be in user gesture so iOS AudioContext is ready for partner's TTS
     setAutoConversation(true);
     autoConvRef.current = true;
     startRecordingRef.current?.('a');
@@ -203,17 +210,9 @@ export default function App() {
   }, [clearSilenceDetector]);
 
   const startRecording = useCallback((speaker) => {
-    if (processing) return;
-
-    // Tap-to-toggle: if already recording same speaker, stop
-    if (recording === speaker) {
-      clearSilenceDetector();
-      stopRecordingRef.current?.(speaker);
-      return;
-    }
-    if (recording) return; // other speaker is recording
-
+    if (processing || recording) return;
     setError('');
+
     if (!navigator.mediaDevices?.getUserMedia) {
       setError('Microphone not supported on this browser. Try Safari 14.3+ or Chrome.');
       return;
@@ -223,9 +222,8 @@ export default function App() {
     const warmBase = import.meta.env.DEV ? '/sarvam/speech-to-text' : '/api/speech-to-text';
     fetch(warmBase, { method: 'HEAD' }).catch(() => {});
 
-    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+    const setupStream = (stream) => {
       streamRef.current = stream;
-
       const mimeType = ['audio/mp4', 'audio/webm', ''].find(
         (t) => t === '' || MediaRecorder.isTypeSupported(t)
       );
@@ -250,11 +248,21 @@ export default function App() {
         streamingSTTRef.current = streamer;
       }
 
-      // Silence detection — auto-stops recording after speech + pause
-      startSilenceDetection(speaker, stream);
+      // Silence detection only in Go Live (hands-free) mode
+      if (autoConvRef.current) startSilenceDetection(speaker, stream);
 
       setRecording(speaker);
-    }).catch((err) => {
+    };
+
+    // In Go Live mode reuse the existing open stream — avoids calling getUserMedia
+    // from a setTimeout (which iOS Safari may block after first permission grant)
+    const liveStream = streamRef.current;
+    if (autoConvRef.current && liveStream?.active) {
+      setupStream(liveStream);
+      return;
+    }
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(setupStream).catch((err) => {
       if (err.name === 'NotAllowedError') {
         setError('Microphone permission denied. On iPhone: Settings → Privacy → Microphone → enable Safari.');
       } else if (err.name === 'NotFoundError') {
@@ -263,7 +271,7 @@ export default function App() {
         setError(`Microphone error: ${err.name} — ${err.message}`);
       }
     });
-  }, [processing, recording, remoteActive, langA, langB, streamKey, clearSilenceDetector, startSilenceDetection]);
+  }, [processing, recording, remoteActive, langA, langB, streamKey, startSilenceDetection]);
 
   // ── Remote mode: incoming message from partner (English pivot → local TTS) ──
   const handlePartnerMessage = useCallback(async (msg) => {
@@ -322,11 +330,21 @@ export default function App() {
             onText,
           });
       setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, audioB64: result.audioB64 } : m));
+
+      // After partner's audio finishes playing, restart listening in hands-free mode
+      result.audioPromise?.then(() => {
+        if (autoConvRef.current) {
+          setTimeout(() => startRecordingRef.current?.('a'), 350);
+        }
+      });
     } catch (err) {
       setError(err.message);
       setProcessing(false);
       setStepId('');
       setStepMsg('');
+      if (autoConvRef.current) {
+        setTimeout(() => startRecordingRef.current?.('a'), 800);
+      }
     }
   }, [langA, voiceA, apiKey, openaiKey]);
 
@@ -336,6 +354,7 @@ export default function App() {
   const attachConnection = useCallback((conn) => {
     connRef.current = conn;
     conn.on('open', () => {
+      unlockAudio(); // pre-warm AudioContext so incoming TTS plays without user gesture
       setPeerState('connected');
       setRemoteModal(null);
       try { conn.send({ type: 'hello', lang: langA, voice: voiceA }); } catch {}
@@ -359,7 +378,7 @@ export default function App() {
     setPeerState('hosting');
     setRemoteModal('host');
     try { peerRef.current?.destroy(); } catch {}
-    const peer = new Peer(hostPeerId(code), { debug: 1 });
+    const peer = new Peer(hostPeerId(code), { debug: 1, config: { iceServers: ICE_SERVERS } });
     peerRef.current = peer;
     peer.on('connection', attachConnection);
     peer.on('error', (err) => {
@@ -384,7 +403,7 @@ export default function App() {
     setRoomCode(code);
     setPeerState('joining');
     try { peerRef.current?.destroy(); } catch {}
-    const peer = new Peer(undefined, { debug: 1 });
+    const peer = new Peer(undefined, { debug: 1, config: { iceServers: ICE_SERVERS } });
     peerRef.current = peer;
     peer.on('open', () => {
       const conn = peer.connect(hostPeerId(code), { reliable: true });
@@ -447,7 +466,11 @@ export default function App() {
         : Promise.resolve(''),
     ]);
     streamingSTTRef.current = null;
-    streamRef.current?.getTracks().forEach((t) => t.stop());
+    // In Go Live mode keep the stream alive so iOS can reuse it without a getUserMedia call from setTimeout
+    if (!autoConvRef.current) {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
 
     const rawMime = mediaRecRef.current?.mimeType || 'audio/webm';
     const mimeType = rawMime.split(';')[0];
@@ -490,6 +513,11 @@ export default function App() {
       setProcessing(false);
       setStepId('');
       setStepMsg('');
+      // Auto-restart for hands-free mode — sender has no audio to wait for,
+      // so restart immediately after sending pivot text to partner
+      if (autoConvRef.current && peerState === 'connected') {
+        setTimeout(() => startRecordingRef.current?.('a'), 350);
+      }
       return;
     }
 
@@ -749,7 +777,8 @@ export default function App() {
                 color={COLORS.amber}
                 isRecording={recording === 'a'}
                 disabled={processing || peerState !== 'connected'}
-                onToggle={() => startRecording('a')}
+                onStart={() => startRecording('a')}
+                onStop={() => stopRecording('a')}
               />
               {peerState === 'connected' && (
                 <button style={s.goLiveBtn} onClick={startAutoConversation}>
@@ -766,7 +795,8 @@ export default function App() {
               color={COLORS.amber}
               isRecording={recording === 'a'}
               disabled={processing || recording === 'b'}
-              onToggle={() => startRecording('a')}
+              onStart={() => startRecording('a')}
+              onStop={() => stopRecording('a')}
             />
 
             <div style={s.divider} />
@@ -777,7 +807,8 @@ export default function App() {
               color={COLORS.teal}
               isRecording={recording === 'b'}
               disabled={processing || recording === 'a'}
-              onToggle={() => startRecording('b')}
+              onStart={() => startRecording('b')}
+              onStop={() => stopRecording('b')}
             />
           </>
         )}
@@ -850,11 +881,11 @@ function PersonSelector({ color, label, lang, voice, langType, onLangChange, onV
   );
 }
 
-function SpeakerButton({ label, sub, color, isRecording, disabled, onToggle }) {
+function SpeakerButton({ label, sub, color, isRecording, disabled, onStart, onStop }) {
   return (
     <div style={s.speakerWrap}>
       <p style={{ ...s.speakerLabel, color }}>{label}</p>
-      <p style={s.speakerSub}>{isRecording ? 'Listening…' : sub}</p>
+      <p style={s.speakerSub}>{sub}</p>
 
       <div style={{ position: 'relative' }}>
         {isRecording && (
@@ -874,12 +905,16 @@ function SpeakerButton({ label, sub, color, isRecording, disabled, onToggle }) {
             transform: isRecording ? 'scale(1.08)' : 'scale(1)',
             boxShadow: isRecording ? `0 0 28px ${color}60` : `0 0 0px transparent`,
           }}
-          onClick={() => { if (!disabled || isRecording) onToggle(); }}
+          onMouseDown={(e) => { e.preventDefault(); if (!disabled) onStart(); }}
+          onMouseUp={(e) => { e.preventDefault(); onStop(); }}
+          onMouseLeave={(e) => { e.preventDefault(); if (isRecording) onStop(); }}
+          onTouchStart={(e) => { e.preventDefault(); if (!disabled) onStart(); }}
+          onTouchEnd={(e) => { e.preventDefault(); onStop(); }}
           disabled={disabled && !isRecording}
         >
           <span style={{ fontSize: '1.8rem', lineHeight: 1 }}>{isRecording ? '⏹' : '🎤'}</span>
           <span style={s.micBtnLabel}>
-            {isRecording ? 'Tap to Stop' : 'Tap to Speak'}
+            {isRecording ? 'Recording…' : 'Hold to Speak'}
           </span>
         </button>
       </div>

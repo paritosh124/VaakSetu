@@ -82,22 +82,21 @@ While the user is speaking, streaming partial results appear in the feed as a da
 ### Browser support
 Requires `AudioWorkletNode` + `WebSocket` — Chrome, Safari 14.5+, Firefox 76+. Falls back to batch otherwise.
 
-## Conversation UX — Tap-to-Toggle + Silence Detection
+## Conversation UX — Hold-to-Speak + Silence Detection (Go Live)
 
 ### Single device (solo mode)
-- Buttons are **tap-to-toggle**: tap once to start, tap again to stop early, OR just stop talking
-- **Silence detection** (amplitude VAD via Web Audio `AnalyserNode`) auto-stops after 1.5s of silence
-- Arms only after 400ms of actual speech (prevents instant-stop on hesitation)
-- Label: "Tap to Speak" → "Tap to Stop"
+- Buttons are **hold-to-speak**: `onMouseDown`/`onTouchStart` → start, `onMouseUp`/`onTouchEnd` → stop
+- `touchAction: 'none'` and `e.preventDefault()` on touch events prevent iOS scroll/zoom interference
+- Label: "Hold to Speak" → "Recording…"
 
 ### Two-phone remote mode
-- Same tap-to-toggle button for manual control
+- Same hold-to-speak button for manual control
 - **"Go Live — hands-free"** button (shown when connected) enters continuous conversation mode:
-  - Starts listening automatically
+  - Starts listening automatically using silence detection (VAD)
   - Silence detection stops recording → processes → plays translation
   - After translation plays, listening restarts automatically (350ms gap)
   - Status indicator shows: `● Listening` / `● Translating` / `● Ready`
-  - "Leave Conversation" exits back to manual tap mode
+  - "Leave Conversation" exits back to manual hold mode
 
 ### Silence detection implementation
 ```js
@@ -108,6 +107,9 @@ const SILENCE_MS = 1500;
 const MIN_SPEECH_MS = 400;
 ```
 Uses refs (`stopRecordingRef`, `startRecordingRef`, `autoConvRef`) to avoid stale closures in `setInterval` callbacks.
+
+### Go Live stream reuse (iOS fix)
+In Go Live mode, the MediaStream is kept alive between utterances (`streamRef.current` not stopped). On restart, `setupStream(liveStream)` is called directly instead of calling `getUserMedia` from a `setTimeout` — iOS Safari blocks `getUserMedia` outside a synchronous user gesture, so reusing the stream is essential.
 
 ## Supported Languages
 
@@ -228,6 +230,23 @@ localStorage keys: `vs_langA`, `vs_langB`, `vs_voiceA`, `vs_voiceB`, `vs_ltypeA`
 ### Room codes
 4-letter codes from consonants only (`BCDFGHJKMNPQRSTVWXYZ`). PeerJS ID prefixed `vaaksetu-XXXX`.
 
+### ICE / STUN configuration
+Both host and guest peers are created with explicit Google STUN servers to improve NAT traversal, especially for laptop ↔ phone across different networks:
+```js
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+];
+new Peer(id, { config: { iceServers: ICE_SERVERS } });
+```
+
+### Cross-device requirement
+Both devices **must use the same URL** (both on `https://vaak-setu.vercel.app`, or both on the same LAN dev server). Laptop on `localhost` + phone on production = different signaling contexts, connection will fail.
+
+### AudioContext unlock in remote mode
+`unlockAudio()` is called in: `createRoom`, `joinRoom`, `startAutoConversation`, and `conn.on('open')`. This ensures the receiver's AudioContext is pre-warmed before any partner audio arrives, critical for desktop browsers which require a user gesture before audio playback.
+
 ## UI Design
 - Dark theme: `#0C0B1A` background, Person A amber `#F5A623`, Person B teal `#0FB8A9`
 - Fonts: Crimson Pro (headers), DM Sans (body)
@@ -238,8 +257,8 @@ localStorage keys: `vs_langA`, `vs_langB`, `vs_voiceA`, `vs_voiceB`, `vs_ltypeA`
 - Remote pairing modal: Create Room (shows code) / Join Room (input code)
 
 ## Features Implemented
-- [x] Tap-to-toggle recording (replaces hold-to-talk)
-- [x] Amplitude VAD silence detection (auto-stops after 1.5s quiet + 400ms speech)
+- [x] Hold-to-speak recording (mouse + touch, iOS-safe)
+- [x] Amplitude VAD silence detection in Go Live mode (auto-stops after 1.5s quiet + 400ms speech)
 - [x] Streaming STT via Sarvam WebSocket (AudioWorklet → PCM → WS)
 - [x] Live partial transcript display while speaking
 - [x] Full STT → Translate → TTS pipeline (Sarvam for Indian, OpenAI for international)
@@ -278,9 +297,9 @@ Pending:
 - [ ] Cache TTS for common short phrases
 
 ## Known Issues / Pending
-- [ ] STT 400 error on receiver phone in remote mode — need full error text body to diagnose
 - [ ] Streaming STT Sarvam protocol assumptions (config format, field names) need validation against actual Sarvam docs once available
 - [ ] Two-phone Go Live: auto-restart timing (350ms gap) may need tuning per device
+- [ ] No TURN servers configured — WebRTC may fail on symmetric NAT (enterprise/VPN networks); would need a paid TURN provider (e.g. Twilio, Metered) for full reliability
 
 ## Deployment
 
@@ -322,11 +341,15 @@ VITE_OPENAI_API_KEY=sk-proj-...
 - Added WebRTC two-phone mode (PeerJS, English pivot over data channel)
 - Added 18 international languages via OpenAI dual-pipeline
 - OpenAI TTS returns binary mp3 → base64 in client, reuses `playBase64Audio`
-- Hold-to-talk → tap-to-toggle + amplitude VAD (1.5s silence auto-stop)
+- Hold-to-talk → tap-to-toggle → reverted back to hold-to-speak (iOS getUserMedia timing issues with tap)
 - Added Go Live hands-free mode for two-phone: VAD loop with auto-restart after TTS
+- Go Live iOS fix: reuse MediaStream between utterances; never call getUserMedia from setTimeout
 - Sarvam announced WebSocket streaming STT + batch job API; implemented streaming
 - Streaming uses AudioWorklet Blob URL (no public/ file needed), 16kHz PCM
 - Key exposure accepted for WebSocket URL; VITE_SARVAM_API_KEY as public Vercel env var
+- Two-phone mode laptop↔phone fix: added Google STUN servers (ICE_SERVERS) to PeerJS config
+- unlockAudio() called at conn.on('open') and startAutoConversation() to pre-warm AudioContext on receiver side
+- Both devices must use the same URL for WebRTC signaling to work (can't mix localhost + production)
 
 ## Commands
 ```bash
