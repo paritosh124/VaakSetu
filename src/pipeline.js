@@ -9,6 +9,8 @@
 
 import { speechToText, translateText, textToSpeech, playBase64Audio } from './api/sarvam.js';
 import { openaiSpeechToEnglish, openaiSpeechToText, openaiTranslate, openaiTTS } from './api/openai.js';
+import { groqSpeechToEnglish, groqTranslate, browserTTS } from './api/groq.js';
+import { elevenLabsTTS } from './api/elevenlabs.js';
 
 /**
  * Sender half — used in remote (two-phone) mode.
@@ -195,4 +197,99 @@ export async function openaiEnglishToSpeech({
   const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
 
   return { pivotText, translatedText, audioB64, audioPromise };
+}
+
+// ─── Groq + ElevenLabs pipeline (international languages, cheaper) ────────────
+
+/**
+ * Full Groq+ElevenLabs pipeline: Groq Whisper STT → Llama translate → ElevenLabs TTS
+ * Same interface as runOpenAIPipeline — drop-in replacement.
+ */
+export async function runGroqPipeline({
+  audioBlob,
+  sourceLang,
+  targetLang,
+  targetLangName,
+  voiceGender,
+  groqKey,
+  elevenLabsKey,
+  onStep,
+  onText,
+}) {
+  const isTargetEnglish = targetLang === 'en-IN' || targetLang === 'en';
+
+  onStep('stt', 'Transcribing speech…');
+  const pivotText = await groqSpeechToEnglish({ audioBlob, apiKey: groqKey, sourceLang });
+
+  let translatedText = pivotText;
+  if (!isTargetEnglish) {
+    onStep('translate', `Translating to ${targetLangName}…`);
+    translatedText = await groqTranslate({ text: pivotText, targetLangName, apiKey: groqKey });
+  }
+
+  onText?.(pivotText, translatedText);
+
+  onStep('tts', 'Generating voice…');
+
+  if (elevenLabsKey) {
+    // ElevenLabs — best quality, returns audio for replay
+    const audioB64 = await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey });
+    onStep('playing', 'Playing…');
+    const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
+    return { pivotText, translatedText, audioB64, audioPromise };
+  } else {
+    // Browser TTS — free, no replay (doesn't return audio data)
+    onStep('playing', 'Playing…');
+    const audioPromise = browserTTS({ text: translatedText, languageCode: targetLang, voiceGender })
+      .then(() => onStep('done', ''))
+      .catch(() => onStep('done', ''));
+    return { pivotText, translatedText, audioB64: null, audioPromise };
+  }
+}
+
+/**
+ * Sender half for remote mode — Groq Whisper → English pivot only.
+ */
+export async function groqSpeechToEnglishPipeline({ audioBlob, groqKey, sourceLang, onStep }) {
+  onStep?.('stt', 'Transcribing speech…');
+  return groqSpeechToEnglish({ audioBlob, apiKey: groqKey, sourceLang });
+}
+
+/**
+ * Receiver half for remote mode — Groq translate → ElevenLabs TTS.
+ */
+export async function groqEnglishToSpeech({
+  pivotText,
+  targetLang,
+  targetLangName,
+  voiceGender,
+  groqKey,
+  elevenLabsKey,
+  onStep,
+  onText,
+}) {
+  const isTargetEnglish = targetLang === 'en-IN' || targetLang === 'en';
+  let translatedText = pivotText;
+
+  if (!isTargetEnglish) {
+    onStep?.('translate', `Translating to ${targetLangName}…`);
+    translatedText = await groqTranslate({ text: pivotText, targetLangName, apiKey: groqKey });
+  }
+
+  onText?.(pivotText, translatedText);
+
+  onStep?.('tts', 'Generating voice…');
+
+  if (elevenLabsKey) {
+    const audioB64 = await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey });
+    onStep?.('playing', 'Playing…');
+    const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
+    return { pivotText, translatedText, audioB64, audioPromise };
+  } else {
+    onStep?.('playing', 'Playing…');
+    const audioPromise = browserTTS({ text: translatedText, languageCode: targetLang, voiceGender })
+      .then(() => onStep?.('done', ''))
+      .catch(() => onStep?.('done', ''));
+    return { pivotText, translatedText, audioB64: null, audioPromise };
+  }
 }

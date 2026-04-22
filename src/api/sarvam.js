@@ -12,6 +12,10 @@
 
 const BASE = import.meta.env.DEV ? '/sarvam' : '/api';
 
+// Sarvam STT uses 'or-IN' for Odia; Translate and TTS use 'od-IN'
+const toSTTCode    = (c) => c === 'od-IN' ? 'or-IN' : c;
+const toNonSTTCode = (c) => c === 'or-IN' ? 'od-IN' : c;
+
 // ─── Speech to Text ──────────────────────────────────────────────────────────
 // mode: 'transcribe' → returns original language text
 //       'translate'  → returns English translation directly (skips a Mayura call!)
@@ -21,7 +25,7 @@ export async function speechToText({ audioBlob, languageCode, mode = 'transcribe
   fd.append('file', audioBlob, `audio.${ext}`);
   fd.append('model', 'saaras:v3');
   fd.append('mode', mode);
-  fd.append('language_code', languageCode); // pass 'unknown' for auto-detect
+  fd.append('language_code', toSTTCode(languageCode)); // pass 'unknown' for auto-detect
 
   const res = await fetch(`${BASE}/speech-to-text`, {
     method: 'POST',
@@ -54,8 +58,8 @@ export async function translateText({ text, sourceLang, targetLang, apiKey }) {
     },
     body: JSON.stringify({
       input: text,
-      source_language_code: sourceLang,
-      target_language_code: targetLang,
+      source_language_code: toNonSTTCode(sourceLang),
+      target_language_code: toNonSTTCode(targetLang),
       model: 'mayura:v1',
       mode: 'modern-colloquial', // natural conversational translation
     }),
@@ -81,7 +85,7 @@ export async function textToSpeech({ text, languageCode, speaker = 'Anand', apiK
     },
     body: JSON.stringify({
       inputs: [text],
-      target_language_code: languageCode,
+      target_language_code: toNonSTTCode(languageCode),
       speaker,
       model: 'bulbul:v3',
       pace: 1.0,

@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { runTranslatePipeline, speechToEnglish, englishToSpeech, runOpenAIPipeline, openaiSpeechToEnglishPipeline, openaiEnglishToSpeech } from './pipeline.js';
+import { runTranslatePipeline, speechToEnglish, englishToSpeech, runOpenAIPipeline, openaiSpeechToEnglishPipeline, openaiEnglishToSpeech, runGroqPipeline, groqSpeechToEnglishPipeline, groqEnglishToSpeech } from './pipeline.js';
 import { playBase64Audio, unlockAudio } from './api/sarvam.js';
 import { SarvamStreamingSTT, supportsStreamingSTT } from './api/sarvam-streaming.js';
 import { Peer } from 'peerjs';
@@ -68,9 +68,13 @@ const ICE_SERVERS = [
 export default function App() {
   const isProd = import.meta.env.PROD;
   const storedKey = !isProd && typeof localStorage !== 'undefined' ? localStorage.getItem('sarvam_key') || '' : '';
-  const storedOAIKey = !isProd && typeof localStorage !== 'undefined' ? localStorage.getItem('openai_key') || '' : '';
-  const [apiKey, setApiKey] = useState(isProd ? '' : (import.meta.env.VITE_SARVAM_API_KEY || storedKey));
-  const [openaiKey, setOpenaiKey] = useState(isProd ? '' : (import.meta.env.VITE_OPENAI_API_KEY || storedOAIKey));
+  const storedOAIKey     = !isProd ? localStorage.getItem('openai_key')     || '' : '';
+  const storedGroqKey    = !isProd ? localStorage.getItem('groq_key')       || '' : '';
+  const storedELKey      = !isProd ? localStorage.getItem('elevenlabs_key') || '' : '';
+  const [apiKey,        setApiKey]        = useState(isProd ? '' : (import.meta.env.VITE_SARVAM_API_KEY     || storedKey));
+  const [openaiKey,     setOpenaiKey]     = useState(isProd ? '' : (import.meta.env.VITE_OPENAI_API_KEY     || storedOAIKey));
+  const [groqKey,       setGroqKey]       = useState(isProd ? '' : (import.meta.env.VITE_GROQ_API_KEY       || storedGroqKey));
+  const [elevenLabsKey, setElevenLabsKey] = useState(isProd ? '' : (import.meta.env.VITE_ELEVENLABS_API_KEY || storedELKey));
   const [showSetup, setShowSetup] = useState(!isProd && !apiKey);
 
   const fixLang = (v) => (v === 'od-IN' ? 'or-IN' : v); // migrate old Odia code
@@ -135,11 +139,15 @@ export default function App() {
     return () => document.removeEventListener('contextmenu', block);
   }, []);
 
-  const handleSaveKey = (sarvamKey, oaiKey) => {
+  const handleSaveKey = (sarvamKey, oaiKey, gKey, elKey) => {
     setApiKey(sarvamKey);
     setOpenaiKey(oaiKey);
-    try { localStorage.setItem('sarvam_key', sarvamKey); } catch {}
-    try { localStorage.setItem('openai_key', oaiKey); } catch {}
+    setGroqKey(gKey);
+    setElevenLabsKey(elKey);
+    try { localStorage.setItem('sarvam_key',     sarvamKey); } catch {}
+    try { localStorage.setItem('openai_key',     oaiKey);    } catch {}
+    try { localStorage.setItem('groq_key',       gKey);      } catch {}
+    try { localStorage.setItem('elevenlabs_key', elKey);     } catch {}
     setShowSetup(false);
   };
 
@@ -288,7 +296,9 @@ export default function App() {
     const sourceLabel = `Partner · ${srcLang.native}`;
     const targetLabel = `${tgtLang.native} (${tgtLang.name})`;
 
-    const useOpenAI = !isIndianLang(langA);
+    const needsIntlA = !isIndianLang(langA);
+    const useGroqA   = needsIntlA && !!groqKey;
+    const useOpenAI  = needsIntlA && !useGroqA;
     const onStep = (id, m) => { setStepId(id); setStepMsg(m); };
     const onText = (pivotText, translatedText) => {
       setMessages((prev) => [
@@ -311,24 +321,35 @@ export default function App() {
 
     try {
       setProcessing(true);
-      const result = useOpenAI
-        ? await openaiEnglishToSpeech({
+      const result = useGroqA
+        ? await groqEnglishToSpeech({
             pivotText: msg.text,
             targetLang: langA,
             targetLangName: tgtLang.name,
             voiceGender: voiceA,
-            openaiKey,
+            groqKey,
+            elevenLabsKey,
             onStep,
             onText,
           })
-        : await englishToSpeech({
-            pivotText: msg.text,
-            targetLang: langA,
-            voice: VOICES[voiceA],
-            apiKey,
-            onStep,
-            onText,
-          });
+        : useOpenAI
+          ? await openaiEnglishToSpeech({
+              pivotText: msg.text,
+              targetLang: langA,
+              targetLangName: tgtLang.name,
+              voiceGender: voiceA,
+              openaiKey,
+              onStep,
+              onText,
+            })
+          : await englishToSpeech({
+              pivotText: msg.text,
+              targetLang: langA,
+              voice: VOICES[voiceA],
+              apiKey,
+              onStep,
+              onText,
+            });
       setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, audioB64: result.audioB64 } : m));
 
       // After partner's audio finishes playing, restart listening in hands-free mode
@@ -346,7 +367,7 @@ export default function App() {
         setTimeout(() => startRecordingRef.current?.('a'), 800);
       }
     }
-  }, [langA, voiceA, apiKey, openaiKey]);
+  }, [langA, voiceA, apiKey, openaiKey, groqKey, elevenLabsKey]);
 
   // Keep latest handler in a ref so PeerJS callbacks always see fresh state
   useEffect(() => { partnerHandlerRef.current = handlePartnerMessage; }, [handlePartnerMessage]);
@@ -490,13 +511,16 @@ export default function App() {
       const srcLang = getLang(langA);
       const messageId = Date.now();
       const sourceLabel = `${srcLang.native} (${srcLang.name})`;
-      const useOpenAIRemote = !isIndianLang(langA);
+      const useGroqRemote   = !isIndianLang(langA) && !!groqKey;
+      const useOpenAIRemote = !isIndianLang(langA) && !useGroqRemote;
       const onStepR = (id, m) => { setStepId(id); setStepMsg(m); };
       try {
         const pivotText = pivotFromStream
-          ? (onStepR('stt', ''), pivotFromStream)  // streaming gave us text — skip STT call
-          : useOpenAIRemote
-            ? await openaiSpeechToEnglishPipeline({ audioBlob, openaiKey, onStep: onStepR })
+          ? (onStepR('stt', ''), pivotFromStream)
+          : useGroqRemote || useOpenAIRemote
+            ? useGroqRemote
+              ? await groqSpeechToEnglishPipeline({ audioBlob, groqKey, sourceLang: langA, onStep: onStepR })
+              : await openaiSpeechToEnglishPipeline({ audioBlob, openaiKey, onStep: onStepR })
             : await speechToEnglish({ audioBlob, sourceLang: langA, apiKey, onStep: onStepR });
         if (connRef.current?.open) {
           connRef.current.send({ type: 'english', text: pivotText, sourceLang: langA, ts: Date.now() });
@@ -534,7 +558,9 @@ export default function App() {
     const sourceLabel = `${srcLang.native} (${srcLang.name})`;
     const targetLabel = `${tgtLang.native} (${tgtLang.name})`;
 
-    const useOpenAI = !isIndianLang(sourceLang) || !isIndianLang(targetLang);
+    const needsIntl = !isIndianLang(sourceLang) || !isIndianLang(targetLang);
+    const useGroq   = needsIntl && !!groqKey;
+    const useOpenAI = needsIntl && !useGroq;
 
     const onStep = (id, msg) => { setStepId(id); setStepMsg(msg); };
     const onText = (pivotText, translatedText) => {
@@ -550,15 +576,26 @@ export default function App() {
     try {
       let result;
 
-      if (pivotFromStream && !useOpenAI) {
-        // ── Fast path: streaming STT gave us English pivot → skip STT call ──
-        // Go directly to Translate → TTS using englishToSpeech()
-        onStep('stt', ''); // clear step
+      if (pivotFromStream && !needsIntl) {
+        // Fast path: streaming STT gave us English pivot — skip STT call
+        onStep('stt', '');
         result = await englishToSpeech({
           pivotText: pivotFromStream,
           targetLang,
           voice,
           apiKey,
+          onStep,
+          onText,
+        });
+      } else if (useGroq) {
+        result = await runGroqPipeline({
+          audioBlob,
+          sourceLang,
+          targetLang,
+          targetLangName: tgtLang.name,
+          voiceGender: listenerVoice,
+          groqKey,
+          elevenLabsKey,
           onStep,
           onText,
         });
@@ -604,10 +641,10 @@ export default function App() {
         setTimeout(() => startRecordingRef.current?.('a'), 800);
       }
     }
-  }, [recording, remoteActive, langA, langB, voiceA, voiceB, apiKey, openaiKey, streamKey, clearSilenceDetector, peerState]);
+  }, [recording, remoteActive, langA, langB, voiceA, voiceB, apiKey, openaiKey, groqKey, elevenLabsKey, streamKey, clearSilenceDetector, peerState]);
 
   if (showSetup) {
-    return <SetupScreen onSave={handleSaveKey} existingKey={apiKey} existingOaiKey={openaiKey} />;
+    return <SetupScreen onSave={handleSaveKey} existingKey={apiKey} existingOaiKey={openaiKey} existingGroqKey={groqKey} existingELKey={elevenLabsKey} />;
   }
 
   const partnerLangInfo = getLang(partnerLang || 'hi-IN');
@@ -1071,10 +1108,14 @@ function RemoteModal({ mode, peerState, roomCode, joinCodeInput, remoteError, on
 }
 
 // ─── Setup / API Key Screen ──────────────────────────────────────────────────
-function SetupScreen({ onSave, existingKey, existingOaiKey }) {
-  const [key, setKey] = useState(existingKey || '');
+function SetupScreen({ onSave, existingKey, existingOaiKey, existingGroqKey, existingELKey }) {
+  const [key,    setKey]    = useState(existingKey    || '');
   const [oaiKey, setOaiKey] = useState(existingOaiKey || '');
+  const [gKey,   setGKey]   = useState(existingGroqKey || '');
+  const [elKey,  setElKey]  = useState(existingELKey  || '');
   const valid = key.trim().length > 20;
+
+  const save = () => valid && onSave(key.trim(), oaiKey.trim(), gKey.trim(), elKey.trim());
 
   return (
     <div style={s.setupRoot}>
@@ -1085,39 +1126,47 @@ function SetupScreen({ onSave, existingKey, existingOaiKey }) {
 
         <div style={s.setupDivider} />
 
-        <label style={s.setupLabel}>Sarvam AI API Key (Indian languages)</label>
-        <input
-          style={s.setupInput}
-          type="password"
-          placeholder="sk_…"
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          autoFocus
-        />
+        {/* Sarvam — required */}
+        <label style={s.setupLabel}>Sarvam AI API Key <span style={{ color: COLORS.amber }}>*required</span></label>
+        <input style={s.setupInput} type="password" placeholder="sk_…" value={key} onChange={(e) => setKey(e.target.value)} autoFocus />
         <p style={s.setupHint}>
-          <a href="https://dashboard.sarvam.ai" target="_blank" rel="noreferrer" style={{ color: COLORS.amber }}>
-            dashboard.sarvam.ai
-          </a>
+          <a href="https://dashboard.sarvam.ai" target="_blank" rel="noreferrer" style={{ color: COLORS.amber }}>dashboard.sarvam.ai</a>
+          {' '}— Indian languages (STT + translate + TTS)
         </p>
 
-        <label style={{ ...s.setupLabel, marginTop: 12 }}>OpenAI API Key (international languages — optional)</label>
+        {/* Groq — recommended for intl */}
+        <label style={{ ...s.setupLabel, marginTop: 10 }}>Groq API Key <span style={{ color: COLORS.teal }}>recommended for international</span></label>
+        <input style={s.setupInput} type="password" placeholder="gsk_…" value={gKey} onChange={(e) => setGKey(e.target.value)} />
+        <p style={s.setupHint}>
+          <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" style={{ color: COLORS.teal }}>console.groq.com</a>
+          {' '}— Whisper STT + Llama translate. Free tier available.
+        </p>
+
+        {/* ElevenLabs — recommended for intl TTS */}
+        <label style={{ ...s.setupLabel, marginTop: 10 }}>ElevenLabs API Key <span style={{ color: COLORS.muted }}>optional — better voice quality</span></label>
+        <input style={s.setupInput} type="password" placeholder="sk_…" value={elKey} onChange={(e) => setElKey(e.target.value)} />
+        <p style={s.setupHint}>
+          <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noreferrer" style={{ color: COLORS.teal }}>elevenlabs.io</a>
+          {' '}— Natural TTS in 32 languages. Free tier: 10k chars/month.
+        </p>
+
+        {/* OpenAI — fallback */}
+        <label style={{ ...s.setupLabel, marginTop: 10 }}>OpenAI API Key <span style={{ color: COLORS.muted }}>fallback if no Groq/ElevenLabs</span></label>
         <input
           style={s.setupInput}
           type="password"
           placeholder="sk-proj-…"
           value={oaiKey}
           onChange={(e) => setOaiKey(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && valid && onSave(key.trim(), oaiKey.trim())}
+          onKeyDown={(e) => e.key === 'Enter' && save()}
         />
         <p style={s.setupHint}>
-          <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer" style={{ color: COLORS.teal }}>
-            platform.openai.com
-          </a>
+          <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer" style={{ color: COLORS.muted }}>platform.openai.com</a>
         </p>
 
         <button
           style={{ ...s.setupBtn, opacity: valid ? 1 : 0.4, cursor: valid ? 'pointer' : 'default' }}
-          onClick={() => valid && onSave(key.trim(), oaiKey.trim())}
+          onClick={save}
         >
           Start Translating →
         </button>

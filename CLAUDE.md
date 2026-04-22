@@ -116,7 +116,11 @@ In Go Live mode, the MediaStream is kept alive between utterances (`streamRef.cu
 ### Indian (Sarvam) — 11 languages
 Hindi (`hi-IN`), English (`en-IN`), Bengali (`bn-IN`), Gujarati (`gu-IN`), Kannada (`kn-IN`), Malayalam (`ml-IN`), Marathi (`mr-IN`), Odia (`or-IN`), Punjabi (`pa-IN`), Tamil (`ta-IN`), Telugu (`te-IN`)
 
-**Important:** Odia code is `or-IN` (NOT `od-IN`). Sarvam rejects `od-IN` with 400. localStorage migration added.
+**Important:** Odia code is inconsistent across Sarvam APIs:
+- STT (Saaras): uses `or-IN`
+- Translate (Mayura) + TTS (Bulbul): uses `od-IN`
+- App stores `or-IN` everywhere (canonical). `toSTTCode` / `toNonSTTCode` helpers in `sarvam.js` normalise per call site.
+- localStorage migration: `od-IN` → `or-IN` already in place.
 
 ### International (OpenAI) — 18 languages
 Spanish (`es`), French (`fr`), German (`de`), Japanese (`ja`), Chinese (`zh`), Arabic (`ar`), Portuguese (`pt`), Russian (`ru`), Italian (`it`), Korean (`ko`), Dutch (`nl`), Turkish (`tr`), Polish (`pl`), Swedish (`sv`), Thai (`th`), Vietnamese (`vi`), Indonesian (`id`), Ukrainian (`uk`)

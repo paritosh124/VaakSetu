@@ -3,3 +3,4 @@ dist/
 .env
 .env.local
 .vercel
+BUSINESS_PLAN.md

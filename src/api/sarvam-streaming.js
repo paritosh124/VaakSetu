@@ -79,10 +79,12 @@ export class SarvamStreamingSTT {
     });
 
     // Send initial config
+    // STT streaming also uses 'or-IN' for Odia (same as batch STT)
+    const sttCode = this.languageCode === 'od-IN' ? 'or-IN' : this.languageCode;
     ws.send(JSON.stringify({
       model: 'saaras:v3',
       mode: this.mode,
-      language_code: this.languageCode,
+      language_code: sttCode,
     }));
 
     // Handle messages

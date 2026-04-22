@@ -8,7 +8,7 @@
 
 const BASE = import.meta.env.DEV ? '/openai' : '/api';
 
-function arrayBufferToBase64(buffer) {
+export function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = '';
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
