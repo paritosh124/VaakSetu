@@ -989,7 +989,10 @@ function MessageBubble({ msg }) {
   const handleReplay = async () => {
     if (!msg.audioB64 || replaying) return;
     setReplaying(true);
-    try { await playBase64Audio(msg.audioB64); } finally { setReplaying(false); }
+    try {
+      const chunks = Array.isArray(msg.audioB64) ? msg.audioB64 : [msg.audioB64];
+      for (const b64 of chunks) if (b64) await playBase64Audio(b64);
+    } finally { setReplaying(false); }
   };
 
   return (

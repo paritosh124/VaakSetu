@@ -55,12 +55,19 @@ export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceG
   onText?.(pivotText, translatedText);
 
   // ── Step 3: Text → Speech ─────────────────────────────────────────────────
+  // Sarvam returns an array of base64 chunks (to sidestep Bulbul's 500-char
+  // limit); ElevenLabs returns a single base64 string. Normalise to an array.
   step('tts', 'Generating voice…');
-  const audioB64 = tgtIndian
+  const audios = tgtIndian
     ? await textToSpeech({ text: translatedText, languageCode: targetLang, speaker: SARVAM_VOICE[voiceGender] })
-    : await elevenLabsTTS({ text: translatedText, voiceGender });
+    : [await elevenLabsTTS({ text: translatedText, voiceGender })];
 
   step('playing', 'Playing…');
-  const audioPromise = playBase64Audio(audioB64).then(() => step('done', ''));
+  const audioPromise = (async () => {
+    for (const b64 of audios) {
+      if (b64) await playBase64Audio(b64);
+    }
+    step('done', '');
+  })();
   return { pivotText, translatedText, audioPromise };
 }

@@ -76,29 +76,74 @@ export async function translateText({ text, sourceLang, targetLang, apiKey }) {
 }
 
 // ─── Text to Speech ──────────────────────────────────────────────────────────
-export async function textToSpeech({ text, languageCode, speaker = 'Anand', apiKey }) {
-  const res = await fetch(`${BASE}/text-to-speech`, {
-    method: 'POST',
-    headers: {
-      'api-subscription-key': apiKey,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      inputs: [text],
-      target_language_code: toNonSTTCode(languageCode),
-      speaker,
-      model: 'bulbul:v3',
-      pace: 1.0,
-    }),
-  });
+// Bulbul v3 caps each `inputs[]` string at 500 chars. Split long translations
+// on sentence boundaries so a single long utterance doesn't fail the whole call.
+const MAX_TTS_CHARS = 450;
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`TTS failed (${res.status}): ${body || res.statusText}`);
+function chunkText(text, maxLen = MAX_TTS_CHARS) {
+  const trimmed = (text || '').trim();
+  if (trimmed.length <= maxLen) return [trimmed];
+  const parts = trimmed.split(/(?<=[.!?।॥。])\s+/);
+  const chunks = [];
+  let buf = '';
+  for (const p of parts) {
+    if (p.length > maxLen) {
+      if (buf) { chunks.push(buf); buf = ''; }
+      const sub = p.split(/(?<=[,;:])\s+|\s+/);
+      let sb = '';
+      for (const w of sub) {
+        if ((sb + ' ' + w).trim().length > maxLen) {
+          if (sb) chunks.push(sb);
+          sb = w;
+        } else {
+          sb = sb ? sb + ' ' + w : w;
+        }
+      }
+      if (sb) chunks.push(sb);
+      continue;
+    }
+    if ((buf + ' ' + p).trim().length > maxLen) {
+      if (buf) chunks.push(buf);
+      buf = p;
+    } else {
+      buf = buf ? buf + ' ' + p : p;
+    }
   }
+  if (buf) chunks.push(buf);
+  return chunks;
+}
 
-  const data = await res.json();
-  return data.audios?.[0] ?? data.audio ?? '';
+// Returns an array of base64 audio strings — one per chunk. Callers play them
+// sequentially via `playBase64Audio` (and store the array for replay).
+export async function textToSpeech({ text, languageCode, speaker = 'Anand', apiKey }) {
+  const chunks = chunkText(text);
+  const audios = [];
+  for (const chunk of chunks) {
+    const res = await fetch(`${BASE}/text-to-speech`, {
+      method: 'POST',
+      headers: {
+        'api-subscription-key': apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        inputs: [chunk],
+        target_language_code: toNonSTTCode(languageCode),
+        speaker,
+        model: 'bulbul:v3',
+        pace: 1.0,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`TTS failed (${res.status}): ${body || res.statusText}`);
+    }
+
+    const data = await res.json();
+    const b64 = data.audios?.[0] ?? data.audio ?? '';
+    if (b64) audios.push(b64);
+  }
+  return audios;
 }
 
 // ─── Audio Playback ──────────────────────────────────────────────────────────

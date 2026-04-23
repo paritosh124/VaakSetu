@@ -20,6 +20,14 @@ const INDIAN_TTS_CODES = new Set([
 const isIndianTarget = (code) => INDIAN_TTS_CODES.has(code);
 const SARVAM_VOICE = { male: 'anand', female: 'ritu' };
 
+// Pipeline result's `audioB64` is always an array of base64 strings (one per
+// Bulbul chunk; length 1 for OpenAI/ElevenLabs). Play them back-to-back.
+async function playAll(audios) {
+  for (const b64 of audios || []) {
+    if (b64) await playBase64Audio(b64);
+  }
+}
+
 /**
  * Sender half — used in remote (two-phone) mode.
  * Speech → English pivot text only. Result is sent to partner over WebRTC.
@@ -51,7 +59,7 @@ export async function englishToSpeech({ pivotText, targetLang, voice, apiKey, on
   const audioB64 = await textToSpeech({ text: translatedText, languageCode: targetLang, speaker: voice || 'anand', apiKey });
 
   onStep?.('playing', 'Playing…');
-  const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
+  const audioPromise = playAll(audioB64).then(() => onStep?.('done', ''));
 
   return { pivotText, translatedText, audioB64, audioPromise };
 }
@@ -111,7 +119,7 @@ export async function runTranslatePipeline({ audioBlob, sourceLang, targetLang, 
 
   // ── Step 4: Play (don't await — let caller handle in background) ─────────
   onStep('playing', 'Playing…');
-  const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
+  const audioPromise = playAll(audioB64).then(() => onStep('done', ''));
 
   return {
     pivotText,
@@ -158,10 +166,10 @@ export async function runOpenAIPipeline({
   // Step 3: TTS-1
   onStep('tts', 'Generating voice…');
   const voice = voiceGender === 'female' ? 'nova' : 'onyx';
-  const audioB64 = await openaiTTS({ text: translatedText, voice, apiKey: openaiKey });
+  const audioB64 = [await openaiTTS({ text: translatedText, voice, apiKey: openaiKey })];
 
   onStep('playing', 'Playing…');
-  const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
+  const audioPromise = playAll(audioB64).then(() => onStep('done', ''));
 
   return { pivotText, translatedText, audioB64, audioPromise };
 }
@@ -199,10 +207,10 @@ export async function openaiEnglishToSpeech({
 
   onStep?.('tts', 'Generating voice…');
   const voice = voiceGender === 'female' ? 'nova' : 'onyx';
-  const audioB64 = await openaiTTS({ text: translatedText, voice, apiKey: openaiKey });
+  const audioB64 = [await openaiTTS({ text: translatedText, voice, apiKey: openaiKey })];
 
   onStep?.('playing', 'Playing…');
-  const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
+  const audioPromise = playAll(audioB64).then(() => onStep?.('done', ''));
 
   return { pivotText, translatedText, audioB64, audioPromise };
 }
@@ -269,14 +277,14 @@ export async function runGroqPipeline({
       apiKey: sarvamKey,
     });
     onStep('playing', 'Playing…');
-    const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
+    const audioPromise = playAll(audioB64).then(() => onStep('done', ''));
     return { pivotText, translatedText, audioB64, audioPromise };
   }
 
   if (elevenLabsKey) {
-    const audioB64 = await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey });
+    const audioB64 = [await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey })];
     onStep('playing', 'Playing…');
-    const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
+    const audioPromise = playAll(audioB64).then(() => onStep('done', ''));
     return { pivotText, translatedText, audioB64, audioPromise };
   }
 
@@ -333,14 +341,14 @@ export async function groqEnglishToSpeech({
       apiKey: sarvamKey,
     });
     onStep?.('playing', 'Playing…');
-    const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
+    const audioPromise = playAll(audioB64).then(() => onStep?.('done', ''));
     return { pivotText, translatedText, audioB64, audioPromise };
   }
 
   if (elevenLabsKey) {
-    const audioB64 = await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey });
+    const audioB64 = [await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey })];
     onStep?.('playing', 'Playing…');
-    const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
+    const audioPromise = playAll(audioB64).then(() => onStep?.('done', ''));
     return { pivotText, translatedText, audioB64, audioPromise };
   }
 
