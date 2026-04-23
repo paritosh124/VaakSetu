@@ -79,6 +79,7 @@ async function ensureMicStream() {
 
 async function init(cfg) {
   config = cfg;
+  console.log('[vaaksetu] offscreen init — sinkAgent:', cfg.sinkAgent, 'sinkCustomer:', cfg.sinkCustomer);
   let tabOk = false, micOk = false, firstErr = null;
 
   try { await ensureTabStream(cfg.streamId); tabOk = true; }
@@ -198,16 +199,31 @@ async function runBatchTurn({ who, blob }) {
 //   5. During TTS playback, the opposite VAD is paused so the translation
 //      doesn't re-trigger a turn through the call audio.
 
-const SILENCE_THRESHOLD = 12;
+// Match the webapp's VAD tuning. 10 is sensitive enough for quiet mics but
+// still clears typical room noise. If a site still can't trigger, drop to 8.
+const SILENCE_THRESHOLD = 10;
 const SILENCE_MS = 1500;
 const MIN_SPEECH_MS = 400;
 
-function createVadLoop({ stream, onSpeechStart, onSpeechEnd }) {
+function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd }) {
   const ac = new AudioContext();
+  // Offscreen docs don't inherit the widget's click as a user gesture, so
+  // new AudioContext() may be created in "suspended" state. Without
+  // resume(), the analyser never processes samples and VAD never fires.
+  if (ac.state === 'suspended') {
+    ac.resume().catch((e) => console.warn('[vaaksetu] VAD ctx resume failed', who, e));
+  }
   const src = ac.createMediaStreamSource(stream);
   const analyser = ac.createAnalyser();
   analyser.fftSize = 512;
+  // Terminate the graph into a muted gain → destination. Some Chromium
+  // builds prune graphs that don't reach destination; this keeps the
+  // analyser "hot" regardless.
+  const mute = ac.createGain();
+  mute.gain.value = 0;
   src.connect(analyser);
+  analyser.connect(mute);
+  mute.connect(ac.destination);
 
   const buf = new Uint8Array(analyser.fftSize);
   let speakingSince = 0;
@@ -215,6 +231,11 @@ function createVadLoop({ stream, onSpeechStart, onSpeechEnd }) {
   let speaking = false;
   let armed = false;
   let paused = false;
+
+  // Periodic RMS sample so you can see in devtools whether the stream is
+  // even producing audio. Logs every ~2s while not armed.
+  let lastDebugAt = 0;
+  let peakRms = 0;
 
   const interval = setInterval(() => {
     if (paused) return;
@@ -225,14 +246,22 @@ function createVadLoop({ stream, onSpeechStart, onSpeechEnd }) {
       sum += v * v;
     }
     const rms = Math.sqrt(sum / buf.length);
+    peakRms = Math.max(peakRms, rms);
     const now = Date.now();
     const active = rms >= SILENCE_THRESHOLD;
+
+    if (now - lastDebugAt >= 2000) {
+      console.log(`[vaaksetu VAD ${who}] state=${ac.state} peakRms=${peakRms.toFixed(1)} threshold=${SILENCE_THRESHOLD} armed=${armed} speaking=${speaking}`);
+      lastDebugAt = now;
+      peakRms = 0;
+    }
 
     if (active) {
       if (!speaking) { speaking = true; speakingSince = now; }
       silentSince = 0;
       if (!armed && now - speakingSince >= MIN_SPEECH_MS) {
         armed = true;
+        console.log(`[vaaksetu VAD ${who}] speech-start (rms=${rms.toFixed(1)})`);
         onSpeechStart?.();
       }
     } else {
@@ -241,6 +270,7 @@ function createVadLoop({ stream, onSpeechStart, onSpeechEnd }) {
         speaking = false;
         armed = false;
         silentSince = 0;
+        console.log(`[vaaksetu VAD ${who}] speech-end`);
         onSpeechEnd?.();
       } else if (!armed) {
         speaking = false;
@@ -254,6 +284,7 @@ function createVadLoop({ stream, onSpeechStart, onSpeechEnd }) {
       clearInterval(interval);
       try { src.disconnect(); } catch {}
       try { analyser.disconnect(); } catch {}
+      try { mute.disconnect(); } catch {}
       try { ac.close(); } catch {}
     },
     pause() { paused = true; speaking = false; armed = false; silentSince = 0; },
@@ -286,11 +317,13 @@ async function startGoLive() {
   post('status', { text: '● Listening' });
 
   vadLoops.customer = createVadLoop({
+    who: 'customer',
     stream: tabStream,
     onSpeechStart: () => beginCapture('customer'),
     onSpeechEnd:   () => endCapture('customer'),
   });
   vadLoops.agent = createVadLoop({
+    who: 'agent',
     stream: micStream,
     onSpeechStart: () => beginCapture('agent'),
     onSpeechEnd:   () => endCapture('agent'),

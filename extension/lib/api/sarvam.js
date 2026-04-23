@@ -117,27 +117,42 @@ export async function textToSpeech({ text, languageCode, speaker = 'anand' }) {
 }
 
 // ─── Playback ────────────────────────────────────────────────────────────────
-// A separate context per sinkId — AudioContext.setSinkId isn't always stable
-// so we keep one context per output device. `default` is the normal speakers.
+// One AudioContext per target sinkId. Chrome supports two ways to route an
+// AudioContext to a non-default output:
+//   1. Constructor option: new AudioContext({ sinkId })  — landed Chrome 110
+//      but some builds silently ignore it for deviceIds from enumerateDevices.
+//   2. Method:  ctx.setSinkId(deviceId)                  — Chrome 110+,
+//      consistently honoured. This is the path we rely on.
+// We always construct with the default, then call setSinkId if a non-default
+// target was requested, and log the outcome so routing failures surface in
+// the offscreen devtools console instead of silently going to speakers.
 const _ctxBySink = new Map();
 
-function makeContext(sinkId) {
+async function makeContext(sinkId) {
   const AC = self.AudioContext || self.webkitAudioContext;
-  // Chrome 110+ accepts { sinkId } directly on the constructor.
+  const ctx = new AC();
+  if (!sinkId || sinkId === 'default') return ctx;
   try {
-    return sinkId && sinkId !== 'default' ? new AC({ sinkId }) : new AC();
-  } catch {
-    return new AC();
+    if (typeof ctx.setSinkId === 'function') {
+      await ctx.setSinkId(sinkId);
+      console.log('[vaaksetu] audio routed to sinkId', sinkId);
+    } else {
+      console.warn('[vaaksetu] ctx.setSinkId unavailable — audio will play on system default');
+    }
+  } catch (err) {
+    console.warn('[vaaksetu] setSinkId failed for', sinkId, err?.message || err,
+      '— audio will play on system default');
   }
+  return ctx;
 }
 
-export function getAudioContext(sinkId = 'default') {
+export async function getAudioContext(sinkId = 'default') {
   let ctx = _ctxBySink.get(sinkId);
   if (!ctx) {
-    ctx = makeContext(sinkId);
+    ctx = await makeContext(sinkId);
     _ctxBySink.set(sinkId, ctx);
   }
-  if (ctx.state === 'suspended') ctx.resume();
+  if (ctx.state === 'suspended') { try { await ctx.resume(); } catch {} }
   return ctx;
 }
 
@@ -145,7 +160,7 @@ export async function playBase64Audio(base64Str, { sinkId = 'default' } = {}) {
   const binary = atob(base64Str);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const ctx = getAudioContext(sinkId);
+  const ctx = await getAudioContext(sinkId);
   const buf = await ctx.decodeAudioData(bytes.buffer.slice(0));
   return new Promise((resolve) => {
     const src = ctx.createBufferSource();
