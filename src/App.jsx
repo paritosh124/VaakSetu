@@ -342,6 +342,7 @@ export default function App() {
             voiceGender: voiceA,
             groqKey: effectiveGroqKeyP,
             elevenLabsKey: effectiveELKeyP,
+            sarvamKey: apiKey,
             onStep,
             onText,
           })
@@ -615,6 +616,7 @@ export default function App() {
           voiceGender: listenerVoice,
           groqKey: effectiveGroqKey,
           elevenLabsKey: elevenLabsKey || import.meta.env.VITE_ELEVENLABS_API_KEY || '',
+          sarvamKey: apiKey,
           onStep,
           onText,
         });

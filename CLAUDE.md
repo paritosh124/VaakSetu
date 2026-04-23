@@ -56,12 +56,33 @@ English speech     → Saaras (mode="transcribe") → English text → Mayura (e
 Any → English      → Saaras (mode="translate")  → English text → Bulbul TTS (skip Mayura)
 ```
 
-### Groq + ElevenLabs pipeline (default international path)
+### Groq + ElevenLabs pipeline (default international path) — HYBRID
+`runGroqPipeline` (solo), `groqEnglishToSpeech` (remote receiver), and the
+extension's `translateAudio` all pick the engine for each step independently,
+so an intl→Indian call uses Sarvam's native Indic voices instead of
+ElevenLabs speaking Hindi with a European accent.
+
 ```
-Any speech → Groq Whisper (/transcriptions → original text) → Groq Llama (→ English)
-           → Groq Llama (English → target) → ElevenLabs Turbo v2.5
-Any → English → Groq Whisper → Groq Llama (→ English) → ElevenLabs (skip 2nd translate)
+STT (source → English pivot):
+  source Indian → Saaras v3 (translate mode — emits English directly)
+  source intl   → Groq Whisper + Llama (transcribe, then translate to English)
+
+Translate (pivot → target text):
+  target == English → skip
+  target Indian     → Mayura (better Indic fluency than Llama)
+  target intl       → Groq Llama 70B
+
+TTS (text → audio):
+  target Indian → Bulbul v3 (anand / ritu)
+  target intl   → ElevenLabs Turbo v2.5 (Daniel / Sarah)
 ```
+
+Why hybrid: ElevenLabs pronounces Devanagari/Tamil/etc with an English accent
+that sounds wrong to native speakers, and Bulbul can't speak European
+languages. Mixing engines per step keeps every output in the best available
+voice for that language. `runGroqPipeline` takes `sarvamKey` alongside
+`groqKey` / `elevenLabsKey` so dev mode can hit Sarvam directly (in prod the
+serverless proxy injects the key).
 
 ### OpenAI pipeline (fallback, only if no Groq key present)
 ```
