@@ -36,12 +36,24 @@
   </section>
 
   <section class="row">
-    <label>Output to</label>
-    <select id="outputSinkId">
-      <option value="default">System default (headphones / speakers)</option>
+    <label>Customer hears (→ Meet's mic)</label>
+    <select id="sinkAgent">
+      <option value="default">System default</option>
     </select>
     <small class="hint-inline">
-      Route translated audio to VB-Cable / BlackHole to feed Google Meet cleanly.
+      Install VB-Cable (Windows) / BlackHole (macOS). Pick its <b>Input</b> side
+      here, then set the matching <b>Output</b> as Meet's microphone. Your
+      translated voice reaches the customer instead of your raw mic.
+    </small>
+  </section>
+
+  <section class="row">
+    <label>You hear</label>
+    <select id="sinkCustomer">
+      <option value="default">System default (headphones)</option>
+    </select>
+    <small class="hint-inline">
+      Translated customer voice plays here. Keep your headphones selected.
     </small>
   </section>
 

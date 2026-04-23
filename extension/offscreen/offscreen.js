@@ -17,6 +17,17 @@ let config = null;
 let tabStream = null;
 let micStream = null;
 let passthroughCtx = null;
+let passthroughSrc = null;
+
+// Per-turn sink lookup.
+//   who === 'agent'    → agent spoke, translation goes to the CUSTOMER (via
+//                        Meet's mic — so feed it into VB-Cable). Use sinkAgent.
+//   who === 'customer' → customer spoke, translation goes to the AGENT's ears.
+//                        Use sinkCustomer (headphones / default output).
+function sinkFor(who) {
+  if (!config) return 'default';
+  return who === 'agent' ? (config.sinkAgent || 'default') : (config.sinkCustomer || 'default');
+}
 
 // Push-to-talk state
 let recorder = null;
@@ -41,10 +52,21 @@ async function ensureTabStream(streamId) {
     audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } },
     video: false,
   });
+  // tabCapture auto-mutes the source tab. Pipe it back to the agent's ears by
+  // default so push-to-talk stays usable (they hear the raw customer between
+  // taps). Disconnected while Go Live is active — in live mode the customer's
+  // raw voice would fight the translation.
   passthroughCtx = new AudioContext();
-  const src = passthroughCtx.createMediaStreamSource(tabStream);
-  src.connect(passthroughCtx.destination);
+  passthroughSrc = passthroughCtx.createMediaStreamSource(tabStream);
+  passthroughSrc.connect(passthroughCtx.destination);
   return tabStream;
+}
+
+function pausePassthrough() {
+  try { passthroughSrc?.disconnect(); } catch {}
+}
+function resumePassthrough() {
+  try { passthroughSrc?.connect(passthroughCtx.destination); } catch {}
 }
 
 async function ensureMicStream() {
@@ -148,7 +170,7 @@ async function runBatchTurn({ who, blob }) {
     const result = await translateAudio({
       audioBlob: blob,
       sourceLang, targetLang, voiceGender,
-      sinkId: config.outputSinkId,
+      sinkId: sinkFor(who),
       onStep: (id, msg) => post('status', { text: msg }),
       onText: (pivotText, translatedText) => {
         post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText, translatedText });
@@ -257,6 +279,9 @@ async function startGoLive() {
   turnQueue = [];
   processing = false;
   activeCapture = null;
+  // In live mode the translation replaces the raw customer audio — passthrough
+  // would otherwise fight it in the agent's ears.
+  pausePassthrough();
   post('goLive', { on: true });
   post('status', { text: '● Listening' });
 
@@ -284,6 +309,7 @@ async function stopGoLive() {
   }
   turnQueue = [];
   processing = false;
+  resumePassthrough();
   post('goLive', { on: false });
   post('status', { text: '' });
   post('partial', { text: '', clear: true });
@@ -378,7 +404,7 @@ async function pumpQueue() {
       // Fast path: streaming STT already produced English pivot.
       const result = await pivotToSpeech({
         pivotText, sourceLang, targetLang, voiceGender,
-        sinkId: config.outputSinkId,
+        sinkId: sinkFor(who),
         onStep: (id, msg) => post('status', { text: msg }),
         onText: (pivot, translated) => {
           post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText: pivot, translatedText: translated });
@@ -390,7 +416,7 @@ async function pumpQueue() {
       const result = await translateAudio({
         audioBlob: blob,
         sourceLang, targetLang, voiceGender,
-        sinkId: config.outputSinkId,
+        sinkId: sinkFor(who),
         onStep: (id, msg) => post('status', { text: msg }),
         onText: (pivot, translated) => {
           post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText: pivot, translatedText: translated });
@@ -418,8 +444,9 @@ function stopAll() {
   chunks = [];
   try { tabStream?.getTracks()?.forEach((t) => t.stop()); } catch {}
   try { micStream?.getTracks()?.forEach((t) => t.stop()); } catch {}
+  try { passthroughSrc?.disconnect(); } catch {}
   try { passthroughCtx?.close(); } catch {}
-  tabStream = micStream = passthroughCtx = null;
+  tabStream = micStream = passthroughCtx = passthroughSrc = null;
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

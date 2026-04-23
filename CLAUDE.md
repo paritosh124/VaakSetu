@@ -594,18 +594,52 @@ Both return `{ audioB64, audioPromise, ... }` where `audioB64` is an array
 (multi-chunk for Bulbul 500-char splits, single-element for ElevenLabs /
 OpenAI). `audioPromise` resolves when all chunks have finished playing.
 
-### Output device routing (VCC support)
-- Popup has a "Output to" dropdown populated from
-  `navigator.mediaDevices.enumerateDevices()` (audiooutput kind). Selection
-  is persisted in `chrome.storage.local` as `outputSinkId`.
-- Background passes `outputSinkId` into the offscreen `init` message.
-- `playBase64Audio(b64, { sinkId })` maintains a `Map` of AudioContexts
-  keyed by sinkId — `new AudioContext({ sinkId })` on Chrome 110+ keeps
-  one context per sink so switches don't reset state.
-- Typical agent setup on Windows: install VB-Cable, pick
-  **CABLE Input (VB-Audio Virtual Cable)** as VaakSetu's output, then set
-  **CABLE Output** as the microphone in Google Meet. Same pattern with
-  BlackHole on macOS.
+### Output device routing — dual-sink (VCC for outgoing, headphones for incoming)
+The translated audio for the two directions must land on **different**
+output devices:
+
+- **Agent speaks →** translated audio must go to the *customer*, which
+  means it has to end up as Meet's microphone input. Send it to the
+  virtual audio cable.
+- **Customer speaks →** translated audio is for the *agent*'s ears. Send
+  it to the headphones.
+
+A single sink can't do both: if you play into VCC only, you hear nothing;
+if you play into headphones only, the customer still hears your raw voice.
+
+UI & storage:
+- Popup shows two dropdowns:
+  `Customer hears (→ Meet's mic)` → persisted as `sinkAgent` (plays
+  translation of agent's speech).
+  `You hear` → persisted as `sinkCustomer` (plays translation of
+  customer's speech).
+- Background reads both and forwards via offscreen `init`. Legacy
+  `outputSinkId` is migrated to `sinkAgent` on first load.
+- Offscreen's `sinkFor(who)` picks `sinkAgent` when `who==='agent'`,
+  otherwise `sinkCustomer`. Both `runBatchTurn` and the Go Live queue use
+  it.
+- `playBase64Audio(b64, { sinkId })` keeps a `Map` of AudioContexts keyed
+  by sinkId — `new AudioContext({ sinkId })` on Chrome 110+ — so
+  switching outputs doesn't reset state.
+
+Tab-audio passthrough:
+- `tabCapture` auto-mutes the source tab. The offscreen creates a
+  passthrough (`passthroughSrc → passthroughCtx.destination`) so PTT mode
+  keeps the call audible between taps.
+- In **Go Live** the passthrough is disconnected (`pausePassthrough()`);
+  otherwise the customer's raw voice would fight the translation in the
+  agent's ears. Reconnected on `stopGoLive`.
+
+Required external setup (Windows example — macOS uses BlackHole similarly):
+1. Install **VB-Audio Virtual Cable** (free, one driver).
+2. In the VaakSetu popup:
+   - `Customer hears (→ Meet's mic)` → **CABLE Input (VB-Audio Virtual Cable)**
+   - `You hear` → your headphones
+3. In Google Meet → Settings → Audio:
+   - Microphone → **CABLE Output (VB-Audio Virtual Cable)**
+   - Speakers → your headphones (same as VaakSetu's "You hear")
+4. Keep your system mic as the default input — VaakSetu captures it via
+   `getUserMedia` directly; Meet never sees it.
 
 ### Streaming STT in the extension
 - Ported to `extension/lib/api/sarvam-streaming.js`. Uses `self.AudioContext`
@@ -700,7 +734,8 @@ No new server-side keys beyond what the webapp uses. The extension's
 - Split extension pipeline into `translateAudio` (batch) and `pivotToSpeech` (fast path when streaming STT already produced the pivot). Both return `audioB64` as an array to accommodate Bulbul's 500-char chunking.
 - Added `chunkText` + chunked `textToSpeech` / `translateText` in both webapp and extension to dodge Bulbul's 500-char and Mayura's 1000-char limits. TTS now returns `string[]`; callers play sequentially.
 - Added `/api/sarvam-ws-key` serverless endpoint so the extension (no build-time Vite env) can fetch the Sarvam key at runtime for streaming WebSocket.
-- Added VB-Cable / BlackHole output routing via `sinkId`. Popup picks an audio output device; `playBase64Audio` keeps a Map of AudioContexts per sinkId so switching outputs doesn't reset.
+- Added dual-sink output routing in the extension: `sinkAgent` (agent speech translation → feeds Meet's mic via VB-Cable / BlackHole) and `sinkCustomer` (customer speech translation → agent's headphones). Single-sink setups couldn't deliver both directions simultaneously.
+- In Go Live the tab-audio passthrough is disconnected so the customer's raw voice doesn't fight the translation in the agent's ears; reconnected on stopGoLive so push-to-talk still hears the live call between taps.
 - Widget: Go Live button added, PTT disabled while live, partial transcript bubble (dashed italic) updates during streaming, feed made `user-select: text` so conversation is copyable.
 
 ## Commands

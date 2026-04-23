@@ -4,7 +4,8 @@ const agentLangEl    = document.getElementById('agentLang');
 const customerLangEl = document.getElementById('customerLang');
 const agentVoiceEl   = document.getElementById('agentVoice');
 const custVoiceEl    = document.getElementById('customerVoice');
-const outputSinkEl   = document.getElementById('outputSinkId');
+const sinkAgentEl    = document.getElementById('sinkAgent');
+const sinkCustomerEl = document.getElementById('sinkCustomer');
 const toggleBtn      = document.getElementById('toggleBtn');
 const statusLine     = document.getElementById('statusLine');
 
@@ -28,10 +29,11 @@ const DEFAULTS = {
   customerLang: 'hi-IN',
   agentVoice:   'male',
   customerVoice:'female',
-  outputSinkId: 'default',
+  sinkAgent:    'default',  // where agent-speech translation plays (→ Meet's mic; usually VCC)
+  sinkCustomer: 'default',  // where customer-speech translation plays (→ agent's ears; headphones)
 };
 
-async function fillOutputDevices(selected) {
+async function fillOutputDevices(selectEl, selected) {
   // enumerateDevices needs mic permission to reveal labels; if denied we still
   // list generic device IDs so the user can pick by position.
   try {
@@ -43,21 +45,31 @@ async function fillOutputDevices(selected) {
       opt.value = d.deviceId;
       opt.textContent = d.label || `Output ${d.deviceId.slice(0, 8)}`;
       if (d.deviceId === selected) opt.selected = true;
-      outputSinkEl.appendChild(opt);
+      selectEl.appendChild(opt);
     }
-    if (selected === 'default') outputSinkEl.value = 'default';
+    if (selected === 'default') selectEl.value = 'default';
   } catch {
     // No permission yet — dropdown stays with just "System default".
   }
 }
 
 async function init() {
-  const saved = await chrome.storage.local.get(['agentLang','customerLang','agentVoice','customerVoice','outputSinkId','running']);
+  const saved = await chrome.storage.local.get([
+    'agentLang','customerLang','agentVoice','customerVoice',
+    'sinkAgent','sinkCustomer','outputSinkId','running',
+  ]);
   fillLangs(agentLangEl,    saved.agentLang    || DEFAULTS.agentLang);
   fillLangs(customerLangEl, saved.customerLang || DEFAULTS.customerLang);
   agentVoiceEl.value = saved.agentVoice   || DEFAULTS.agentVoice;
   custVoiceEl.value  = saved.customerVoice|| DEFAULTS.customerVoice;
-  await fillOutputDevices(saved.outputSinkId || DEFAULTS.outputSinkId);
+  // Migrate old single-sink preference to the "customer hears" side (it was the
+  // only output, and most users previously aimed that at a VCC / headphones).
+  const savedSinkAgent    = saved.sinkAgent    ?? saved.outputSinkId ?? DEFAULTS.sinkAgent;
+  const savedSinkCustomer = saved.sinkCustomer ?? DEFAULTS.sinkCustomer;
+  await Promise.all([
+    fillOutputDevices(sinkAgentEl,    savedSinkAgent),
+    fillOutputDevices(sinkCustomerEl, savedSinkCustomer),
+  ]);
 
   setRunning(!!saved.running);
 
@@ -65,7 +77,8 @@ async function init() {
   customerLangEl.addEventListener('change', (e) => chrome.storage.local.set({ customerLang: e.target.value }));
   agentVoiceEl.addEventListener('change',   (e) => chrome.storage.local.set({ agentVoice:   e.target.value }));
   custVoiceEl.addEventListener('change',    (e) => chrome.storage.local.set({ customerVoice:e.target.value }));
-  outputSinkEl.addEventListener('change',   (e) => chrome.storage.local.set({ outputSinkId: e.target.value }));
+  sinkAgentEl.addEventListener('change',    (e) => chrome.storage.local.set({ sinkAgent:    e.target.value }));
+  sinkCustomerEl.addEventListener('change', (e) => chrome.storage.local.set({ sinkCustomer: e.target.value }));
 
   toggleBtn.addEventListener('click', onToggle);
 }

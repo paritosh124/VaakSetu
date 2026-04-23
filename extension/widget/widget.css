@@ -94,6 +94,7 @@
   padding: 10px 12px;
   background: #0F0E1F;
   border-top: 1px solid #2a2750;
+  flex-shrink: 0;
 }
 #vaaksetu-widget .vs-btn {
   padding: 12px 6px;
@@ -114,22 +115,30 @@
 #vaaksetu-widget .vs-btn small { display: block; opacity: .75; font-weight: 400; margin-top: 2px; font-size: 10px; }
 
 #vaaksetu-widget .vs-live-row {
-  padding: 0 12px 10px;
+  padding: 0 12px 12px;
   background: #0F0E1F;
+  border-top: 1px solid #2a2750;
+  padding-top: 10px;
+  flex-shrink: 0;
 }
 #vaaksetu-widget .vs-golive {
   width: 100%;
-  padding: 10px;
-  border: 1px solid #2a2750;
+  padding: 11px;
+  border: none;
   border-radius: 8px;
-  background: #1f1c3d;
-  color: #EDE9F5;
-  font-size: 12px;
-  font-weight: 600;
+  background: linear-gradient(135deg, #7B61FF 0%, #0FB8A9 100%);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .2px;
   cursor: pointer;
+  pointer-events: auto;
+  opacity: 1;
+  transition: transform .06s ease, filter .1s ease;
 }
+#vaaksetu-widget .vs-golive:hover { filter: brightness(1.1); }
+#vaaksetu-widget .vs-golive:active { transform: scale(.98); }
 #vaaksetu-widget .vs-golive.vs-live-on {
   background: #E5484D;
-  border-color: #E5484D;
   color: #fff;
 }
