@@ -71,10 +71,12 @@ export default function App() {
   const storedOAIKey     = !isProd ? localStorage.getItem('openai_key')     || '' : '';
   const storedGroqKey    = !isProd ? localStorage.getItem('groq_key')       || '' : '';
   const storedELKey      = !isProd ? localStorage.getItem('elevenlabs_key') || '' : '';
-  const [apiKey,        setApiKey]        = useState(isProd ? '' : (import.meta.env.VITE_SARVAM_API_KEY     || storedKey));
-  const [openaiKey,     setOpenaiKey]     = useState(isProd ? '' : (import.meta.env.VITE_OPENAI_API_KEY     || storedOAIKey));
-  const [groqKey,       setGroqKey]       = useState(isProd ? '' : (import.meta.env.VITE_GROQ_API_KEY       || storedGroqKey));
-  const [elevenLabsKey, setElevenLabsKey] = useState(isProd ? '' : (import.meta.env.VITE_ELEVENLABS_API_KEY || storedELKey));
+  // Prefer .env value; only fall back to localStorage if .env value is absent (undefined), not if it's intentionally empty ('')
+  const envOr = (envVal, stored) => (envVal !== undefined && envVal !== '' ? envVal : stored);
+  const [apiKey,        setApiKey]        = useState(isProd ? '' : envOr(import.meta.env.VITE_SARVAM_API_KEY,     storedKey));
+  const [openaiKey,     setOpenaiKey]     = useState(isProd ? '' : envOr(import.meta.env.VITE_OPENAI_API_KEY,     storedOAIKey));
+  const [groqKey,       setGroqKey]       = useState(isProd ? '' : envOr(import.meta.env.VITE_GROQ_API_KEY,       storedGroqKey));
+  const [elevenLabsKey, setElevenLabsKey] = useState(isProd ? '' : envOr(import.meta.env.VITE_ELEVENLABS_API_KEY, storedELKey));
   const [showSetup, setShowSetup] = useState(!isProd && !apiKey);
 
   const fixLang = (v) => (v === 'od-IN' ? 'or-IN' : v); // migrate old Odia code
@@ -150,6 +152,14 @@ export default function App() {
     try { localStorage.setItem('elevenlabs_key', elKey);     } catch {}
     setShowSetup(false);
   };
+
+  // Defensive: if Groq is available, never use OpenAI — wipe any stale key from state + localStorage
+  useEffect(() => {
+    if (groqKey && openaiKey) {
+      setOpenaiKey('');
+      try { localStorage.removeItem('openai_key'); } catch {}
+    }
+  }, [groqKey, openaiKey]);
 
   // Keep always-current refs so setTimeout/setInterval callbacks see fresh functions
   useEffect(() => { stopRecordingRef.current = stopRecording; });
@@ -297,8 +307,11 @@ export default function App() {
     const targetLabel = `${tgtLang.native} (${tgtLang.name})`;
 
     const needsIntlA = !isIndianLang(langA);
-    const useGroqA   = needsIntlA && !!groqKey;
-    const useOpenAI  = needsIntlA && !useGroqA;
+    const effectiveGroqKeyP = groqKey || import.meta.env.VITE_GROQ_API_KEY || '';
+    const effectiveELKeyP   = elevenLabsKey || import.meta.env.VITE_ELEVENLABS_API_KEY || '';
+    const useGroqA   = needsIntlA && !!effectiveGroqKeyP;
+    const useOpenAI  = needsIntlA && !useGroqA && !!openaiKey;
+    if (needsIntlA) console.log('[pipeline] partner intl →', useGroqA ? 'Groq' : useOpenAI ? 'OpenAI' : 'none');
     const onStep = (id, m) => { setStepId(id); setStepMsg(m); };
     const onText = (pivotText, translatedText) => {
       setMessages((prev) => [
@@ -327,8 +340,8 @@ export default function App() {
             targetLang: langA,
             targetLangName: tgtLang.name,
             voiceGender: voiceA,
-            groqKey,
-            elevenLabsKey,
+            groqKey: effectiveGroqKeyP,
+            elevenLabsKey: effectiveELKeyP,
             onStep,
             onText,
           })
@@ -511,15 +524,17 @@ export default function App() {
       const srcLang = getLang(langA);
       const messageId = Date.now();
       const sourceLabel = `${srcLang.native} (${srcLang.name})`;
-      const useGroqRemote   = !isIndianLang(langA) && !!groqKey;
-      const useOpenAIRemote = !isIndianLang(langA) && !useGroqRemote;
+      const effectiveGroqKeyR = groqKey || import.meta.env.VITE_GROQ_API_KEY || '';
+      const useGroqRemote   = !isIndianLang(langA) && !!effectiveGroqKeyR;
+      const useOpenAIRemote = !isIndianLang(langA) && !useGroqRemote && !!openaiKey;
+      if (!isIndianLang(langA)) console.log('[pipeline] remote intl →', useGroqRemote ? 'Groq' : useOpenAIRemote ? 'OpenAI' : 'none');
       const onStepR = (id, m) => { setStepId(id); setStepMsg(m); };
       try {
         const pivotText = pivotFromStream
           ? (onStepR('stt', ''), pivotFromStream)
           : useGroqRemote || useOpenAIRemote
             ? useGroqRemote
-              ? await groqSpeechToEnglishPipeline({ audioBlob, groqKey, sourceLang: langA, onStep: onStepR })
+              ? await groqSpeechToEnglishPipeline({ audioBlob, groqKey: effectiveGroqKeyR, sourceLang: langA, onStep: onStepR })
               : await openaiSpeechToEnglishPipeline({ audioBlob, openaiKey, onStep: onStepR })
             : await speechToEnglish({ audioBlob, sourceLang: langA, apiKey, onStep: onStepR });
         if (connRef.current?.open) {
@@ -559,8 +574,12 @@ export default function App() {
     const targetLabel = `${tgtLang.native} (${tgtLang.name})`;
 
     const needsIntl = !isIndianLang(sourceLang) || !isIndianLang(targetLang);
-    const useGroq   = needsIntl && !!groqKey;
-    const useOpenAI = needsIntl && !useGroq;
+    // Prefer Groq for intl when any Groq key is present (state OR env). Only fall back
+    // to OpenAI if no Groq key exists anywhere — prevents stale OpenAI key from taking over.
+    const effectiveGroqKey = groqKey || import.meta.env.VITE_GROQ_API_KEY || '';
+    const useGroq   = needsIntl && !!effectiveGroqKey;
+    const useOpenAI = needsIntl && !useGroq && !!openaiKey;
+    if (needsIntl) console.log('[pipeline] solo intl →', useGroq ? 'Groq' : useOpenAI ? 'OpenAI' : 'none', { groqKey: !!effectiveGroqKey, openaiKey: !!openaiKey });
 
     const onStep = (id, msg) => { setStepId(id); setStepMsg(msg); };
     const onText = (pivotText, translatedText) => {
@@ -594,8 +613,8 @@ export default function App() {
           targetLang,
           targetLangName: tgtLang.name,
           voiceGender: listenerVoice,
-          groqKey,
-          elevenLabsKey,
+          groqKey: effectiveGroqKey,
+          elevenLabsKey: elevenLabsKey || import.meta.env.VITE_ELEVENLABS_API_KEY || '',
           onStep,
           onText,
         });
