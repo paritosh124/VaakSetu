@@ -35,6 +35,16 @@
     </div>
   </section>
 
+  <section class="row">
+    <label>Output to</label>
+    <select id="outputSinkId">
+      <option value="default">System default (headphones / speakers)</option>
+    </select>
+    <small class="hint-inline">
+      Route translated audio to VB-Cable / BlackHole to feed Google Meet cleanly.
+    </small>
+  </section>
+
   <section class="action">
     <button id="toggleBtn" class="primary">Start translator</button>
     <p id="statusLine" class="status"></p>
@@ -42,8 +52,9 @@
 
   <footer>
     <p class="hint">
-      After starting, open the call tab and use the floating widget.
-      Press-and-hold <b>Customer</b> or <b>Agent</b> while they speak.
+      After starting, open the call tab and use the floating widget. Hold
+      <b>Customer</b> / <b>Agent</b> to translate one turn, or click
+      <b>Go Live</b> for hands-free continuous translation.
     </p>
   </footer>
 

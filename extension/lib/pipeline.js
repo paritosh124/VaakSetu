@@ -21,14 +21,12 @@ import { isIndianLang, getLang } from './config.js';
 
 const SARVAM_VOICE = { male: 'anand', female: 'ritu' };
 
-export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceGender = 'male', onStep, onText }) {
+// Batch path (push-to-talk): audio blob in, full pipeline.
+export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceGender = 'male', sinkId, onStep, onText }) {
   const step = (id, msg) => onStep?.(id, msg);
   const srcIndian = isIndianLang(sourceLang);
-  const tgtIndian = isIndianLang(targetLang);
-  const isTgtEnglish = targetLang === 'en-IN' || targetLang === 'en';
-  const targetLangName = getLang(targetLang).name;
 
-  // ── Step 1: Speech → English pivot ────────────────────────────────────────
+  // Step 1: Speech → English pivot.
   let pivotText;
   if (srcIndian) {
     const isSrcEn = sourceLang === 'en-IN';
@@ -44,7 +42,17 @@ export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceG
     pivotText = await groqSpeechToEnglish({ audioBlob, sourceLang });
   }
 
-  // ── Step 2: English pivot → target text ───────────────────────────────────
+  return pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGender, sinkId, onStep, onText });
+}
+
+// Streaming path: pivot already produced by Sarvam streaming STT — skip Step 1.
+export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGender = 'male', sinkId, onStep, onText }) {
+  const step = (id, msg) => onStep?.(id, msg);
+  const tgtIndian = isIndianLang(targetLang);
+  const isTgtEnglish = targetLang === 'en-IN' || targetLang === 'en';
+  const targetLangName = getLang(targetLang).name;
+
+  // Step 2: English pivot → target text.
   let translatedText = pivotText;
   if (!isTgtEnglish) {
     step('translate', `Translating to ${targetLangName}…`);
@@ -54,9 +62,7 @@ export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceG
   }
   onText?.(pivotText, translatedText);
 
-  // ── Step 3: Text → Speech ─────────────────────────────────────────────────
-  // Sarvam returns an array of base64 chunks (to sidestep Bulbul's 500-char
-  // limit); ElevenLabs returns a single base64 string. Normalise to an array.
+  // Step 3: Text → Speech. Array-normalised to handle Bulbul chunking + single-shot ElevenLabs.
   step('tts', 'Generating voice…');
   const audios = tgtIndian
     ? await textToSpeech({ text: translatedText, languageCode: targetLang, speaker: SARVAM_VOICE[voiceGender] })
@@ -65,7 +71,7 @@ export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceG
   step('playing', 'Playing…');
   const audioPromise = (async () => {
     for (const b64 of audios) {
-      if (b64) await playBase64Audio(b64);
+      if (b64) await playBase64Audio(b64, { sinkId });
     }
     step('done', '');
   })();

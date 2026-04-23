@@ -529,9 +529,136 @@ The extension ships its own copies of `pipeline.js` + `api/sarvam.js|groq.js|ele
 
 ### Explicitly out-of-scope for phase 1
 - Usage/minutes logging (paused pending login design).
-- VAD / hands-free continuous mode — push-to-talk only for now.
-- Virtual audio cable integration for clean customer-directed audio.
-- Per-agent config beyond language + voice.
+- Per-agent config beyond language + voice + output device.
+
+## Chrome Extension — Go Live (hands-free, low-latency)
+
+Conversational layer for live calls (Google Meet etc.): once the agent clicks
+**Go Live** on the floating widget, VaakSetu listens to both sides
+continuously, streams customer/agent speech to Sarvam over WebSocket, and
+plays back translated audio with the same latency profile as the webapp
+(~0.9s after the speaker stops). Push-to-talk still works; Go Live is
+additive.
+
+### Architecture
+```
+tab audio (customer) ─► VAD ─► SarvamStreamingSTT ─► partial transcripts ─► widget
+                                     │
+                                     ▼ (on silence)
+                              pivot (English)
+                                     │
+mic audio   (agent)   ─► VAD ─► ────┤
+                                     ▼
+                               turnQueue (serial)
+                                     │
+                                     ▼
+              pivotToSpeech   (Mayura + Bulbul | Groq Llama + ElevenLabs)
+                                     │
+                                     ▼
+                     playBase64Audio(b64, { sinkId })
+                                     │
+                                     ▼
+                speakers | VB-Cable | BlackHole (Meet mic input)
+```
+
+- **VAD** (`createVadLoop` in `extension/offscreen/offscreen.js`):
+  AnalyserNode RMS sampled every 60ms on each stream. Thresholds:
+  `SILENCE_THRESHOLD=12`, `SILENCE_MS=1500`, `MIN_SPEECH_MS=400`.
+  On speech onset → `beginCapture(who)`; on sustained silence →
+  `endCapture(who)`.
+- **beginCapture** opens both a streaming STT (if source is Indian —
+  Sarvam only) and a batch `MediaRecorder` in parallel. Batch is used for
+  intl sources (Groq Whisper) and as a fallback if the WebSocket drops.
+- **endCapture** stops the streamer (final transcript), stops the recorder
+  (blob), enqueues the turn. Only one `activeCapture` at a time; concurrent
+  VAD wake-ups on the *other* side are ignored until the current capture
+  closes.
+- **Turn queue**: `pumpQueue` processes turns serially. During
+  translate+TTS playback, the **opposite** side's VAD is paused so the
+  translation coming out of speakers doesn't retrigger a turn through the
+  call audio. The speaker's own VAD stays armed so they can start the next
+  utterance immediately.
+- **Feedback guard**: pause/resume is enough when output goes to a virtual
+  audio cable (no acoustic loop). With default speakers, echo cancellation
+  on the mic plus the VAD pause is enough in practice — recommend
+  headphones-with-mic for clean operation.
+
+### Pipeline split (`extension/lib/pipeline.js`)
+- `translateAudio({ audioBlob, ... })` — batch path (push-to-talk and
+  intl-source Go Live). Runs full STT + translate + TTS.
+- `pivotToSpeech({ pivotText, ... })` — fast path when streaming STT has
+  already produced the English pivot. Translate + TTS only. Same hybrid
+  engine choice per step as the webapp.
+
+Both return `{ audioB64, audioPromise, ... }` where `audioB64` is an array
+(multi-chunk for Bulbul 500-char splits, single-element for ElevenLabs /
+OpenAI). `audioPromise` resolves when all chunks have finished playing.
+
+### Output device routing (VCC support)
+- Popup has a "Output to" dropdown populated from
+  `navigator.mediaDevices.enumerateDevices()` (audiooutput kind). Selection
+  is persisted in `chrome.storage.local` as `outputSinkId`.
+- Background passes `outputSinkId` into the offscreen `init` message.
+- `playBase64Audio(b64, { sinkId })` maintains a `Map` of AudioContexts
+  keyed by sinkId — `new AudioContext({ sinkId })` on Chrome 110+ keeps
+  one context per sink so switches don't reset state.
+- Typical agent setup on Windows: install VB-Cable, pick
+  **CABLE Input (VB-Audio Virtual Cable)** as VaakSetu's output, then set
+  **CABLE Output** as the microphone in Google Meet. Same pattern with
+  BlackHole on macOS.
+
+### Streaming STT in the extension
+- Ported to `extension/lib/api/sarvam-streaming.js`. Uses `self.AudioContext`
+  (offscreen doc context), 16 kHz PCM Int16 over WebSocket.
+- The extension can't bake `VITE_SARVAM_API_KEY` at build time, so it
+  fetches the key at runtime from `/api/sarvam-ws-key` (see
+  `api/sarvam-ws-key.js`). The key is cached per offscreen session.
+- Streaming is only engaged for Indian source languages (Sarvam
+  constraint). Intl sources use the batch `MediaRecorder` blob → Groq
+  Whisper path.
+
+### 500-char / 1000-char limit fixes (applies to webapp and extension)
+- **Bulbul TTS** rejects >500 chars. `textToSpeech` in both
+  `src/api/sarvam.js` and `extension/lib/api/sarvam.js` now splits input
+  via `chunkText(text, maxLen)` (sentence boundaries → comma fallback →
+  whitespace fallback) and returns `string[]` of base64 clips. Callers
+  play sequentially.
+- **Mayura translate** rejects >1000 chars. `translateText` chunks at
+  `MAX_TRANSLATE_CHARS = 900`, runs `translateOne` per chunk, joins with
+  spaces.
+- `audioB64` in all pipeline results is now an array (single-element for
+  ElevenLabs/OpenAI, multi for Bulbul). The webapp's replay button
+  iterates; the extension's `audioPromise` awaits each chunk in order.
+
+### Widget additions
+- **Go Live toggle button** below the PTT pair. Sends
+  `{ type: 'goLive' | 'stopGoLive' }` to background. PTT buttons disable
+  while Go Live is active.
+- **Partial transcript bubble** (`.vs-partial`): dashed, italic, color-coded
+  per speaker. Updated on every `partial` event from offscreen, cleared on
+  `message` arrival (the finalized turn) or `goLive { on: false }`.
+- **Copyable feed**: `.vs-feed` and descendants set to `user-select: text`
+  so conversation text can be copied out. Widget root remains
+  `user-select: none` to keep the header draggable.
+
+### Updated file layout
+```
+api/
+  sarvam-ws-key.js          — runtime Sarvam-key endpoint for extension
+extension/
+  lib/api/
+    sarvam-streaming.js     — ported SarvamStreamingSTT
+    sarvam.js               — sinkId-aware playBase64Audio, chunked TTS
+  lib/
+    pipeline.js             — split: translateAudio + pivotToSpeech
+  offscreen/offscreen.js    — VAD, streaming capture, turn queue
+  popup/                    — output-device picker
+  widget/                   — Go Live button, partial bubble, copyable feed
+```
+
+### Vercel env vars (extension-specific)
+No new server-side keys beyond what the webapp uses. The extension's
+`/api/sarvam-ws-key` reads the same `SARVAM_API_KEY` already deployed.
 
 ## Business Context
 - Sarvam models outperform Google Translate for Indian languages — key differentiator
@@ -569,6 +696,12 @@ The extension ships its own copies of `pipeline.js` + `api/sarvam.js|groq.js|ele
 - Added CORS to `/api/*`: `vercel.json` headers block + `api/_cors.js` `handlePreflight()` imported by every serverless function
 - Built Chrome MV3 extension (`extension/`) for call-center agent deployment — push-to-talk overlay, tabCapture + getUserMedia, speakerphone-mode audio routing
 - Extension mic permission fix: popup triggers `getUserMedia({audio:true})` before sending `start` — offscreen docs inherit the grant. Lazy retry on first agent press for resilience.
+- Added Go Live hands-free mode in the extension: per-stream VAD + Sarvam streaming STT + serial turn queue + opposite-side VAD pause during TTS. Parity with the webapp's latency profile (~0.9s after stop).
+- Split extension pipeline into `translateAudio` (batch) and `pivotToSpeech` (fast path when streaming STT already produced the pivot). Both return `audioB64` as an array to accommodate Bulbul's 500-char chunking.
+- Added `chunkText` + chunked `textToSpeech` / `translateText` in both webapp and extension to dodge Bulbul's 500-char and Mayura's 1000-char limits. TTS now returns `string[]`; callers play sequentially.
+- Added `/api/sarvam-ws-key` serverless endpoint so the extension (no build-time Vite env) can fetch the Sarvam key at runtime for streaming WebSocket.
+- Added VB-Cable / BlackHole output routing via `sinkId`. Popup picks an audio output device; `playBase64Audio` keeps a Map of AudioContexts per sinkId so switching outputs doesn't reset.
+- Widget: Go Live button added, PTT disabled while live, partial transcript bubble (dashed italic) updates during streaming, feed made `user-select: text` so conversation is copyable.
 
 ## Commands
 ```bash

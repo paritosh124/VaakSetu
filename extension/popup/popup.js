@@ -4,6 +4,7 @@ const agentLangEl    = document.getElementById('agentLang');
 const customerLangEl = document.getElementById('customerLang');
 const agentVoiceEl   = document.getElementById('agentVoice');
 const custVoiceEl    = document.getElementById('customerVoice');
+const outputSinkEl   = document.getElementById('outputSinkId');
 const toggleBtn      = document.getElementById('toggleBtn');
 const statusLine     = document.getElementById('statusLine');
 
@@ -27,14 +28,36 @@ const DEFAULTS = {
   customerLang: 'hi-IN',
   agentVoice:   'male',
   customerVoice:'female',
+  outputSinkId: 'default',
 };
 
+async function fillOutputDevices(selected) {
+  // enumerateDevices needs mic permission to reveal labels; if denied we still
+  // list generic device IDs so the user can pick by position.
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const outs = devices.filter((d) => d.kind === 'audiooutput');
+    for (const d of outs) {
+      if (d.deviceId === 'default') continue;
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `Output ${d.deviceId.slice(0, 8)}`;
+      if (d.deviceId === selected) opt.selected = true;
+      outputSinkEl.appendChild(opt);
+    }
+    if (selected === 'default') outputSinkEl.value = 'default';
+  } catch {
+    // No permission yet — dropdown stays with just "System default".
+  }
+}
+
 async function init() {
-  const saved = await chrome.storage.local.get(['agentLang','customerLang','agentVoice','customerVoice','running']);
+  const saved = await chrome.storage.local.get(['agentLang','customerLang','agentVoice','customerVoice','outputSinkId','running']);
   fillLangs(agentLangEl,    saved.agentLang    || DEFAULTS.agentLang);
   fillLangs(customerLangEl, saved.customerLang || DEFAULTS.customerLang);
   agentVoiceEl.value = saved.agentVoice   || DEFAULTS.agentVoice;
   custVoiceEl.value  = saved.customerVoice|| DEFAULTS.customerVoice;
+  await fillOutputDevices(saved.outputSinkId || DEFAULTS.outputSinkId);
 
   setRunning(!!saved.running);
 
@@ -42,6 +65,7 @@ async function init() {
   customerLangEl.addEventListener('change', (e) => chrome.storage.local.set({ customerLang: e.target.value }));
   agentVoiceEl.addEventListener('change',   (e) => chrome.storage.local.set({ agentVoice:   e.target.value }));
   custVoiceEl.addEventListener('change',    (e) => chrome.storage.local.set({ customerVoice:e.target.value }));
+  outputSinkEl.addEventListener('change',   (e) => chrome.storage.local.set({ outputSinkId: e.target.value }));
 
   toggleBtn.addEventListener('click', onToggle);
 }

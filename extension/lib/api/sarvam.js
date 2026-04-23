@@ -20,7 +20,12 @@ export async function speechToText({ audioBlob, languageCode, mode = 'transcribe
   return { transcript: data.transcript, detectedLanguage: data.language_code };
 }
 
-export async function translateText({ text, sourceLang, targetLang }) {
+// Mayura's `input` field caps at 1000 chars per request. Long utterances need
+// to be chunked and recombined; sentence-boundary splits keep each chunk
+// translatable in isolation without losing meaning.
+const MAX_TRANSLATE_CHARS = 900;
+
+async function translateOne({ text, sourceLang, targetLang }) {
   const res = await fetch(`${API_BASE}/translate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -35,6 +40,16 @@ export async function translateText({ text, sourceLang, targetLang }) {
   if (!res.ok) throw new Error(`Sarvam translate failed (${res.status}): ${await res.text().catch(() => res.statusText)}`);
   const data = await res.json();
   return data.translated_text ?? data.translation ?? data.output ?? '';
+}
+
+export async function translateText({ text, sourceLang, targetLang }) {
+  const chunks = chunkText(text, MAX_TRANSLATE_CHARS);
+  if (chunks.length === 1) return translateOne({ text: chunks[0], sourceLang, targetLang });
+  const out = [];
+  for (const c of chunks) {
+    out.push(await translateOne({ text: c, sourceLang, targetLang }));
+  }
+  return out.join(' ');
 }
 
 // Bulbul v3 caps each `inputs[]` string at 500 chars. Split long translations
@@ -102,18 +117,35 @@ export async function textToSpeech({ text, languageCode, speaker = 'anand' }) {
 }
 
 // ─── Playback ────────────────────────────────────────────────────────────────
-let _ctx = null;
-export function getAudioContext() {
-  if (!_ctx) _ctx = new (self.AudioContext || self.webkitAudioContext)();
-  if (_ctx.state === 'suspended') _ctx.resume();
-  return _ctx;
+// A separate context per sinkId — AudioContext.setSinkId isn't always stable
+// so we keep one context per output device. `default` is the normal speakers.
+const _ctxBySink = new Map();
+
+function makeContext(sinkId) {
+  const AC = self.AudioContext || self.webkitAudioContext;
+  // Chrome 110+ accepts { sinkId } directly on the constructor.
+  try {
+    return sinkId && sinkId !== 'default' ? new AC({ sinkId }) : new AC();
+  } catch {
+    return new AC();
+  }
 }
 
-export async function playBase64Audio(base64Str) {
+export function getAudioContext(sinkId = 'default') {
+  let ctx = _ctxBySink.get(sinkId);
+  if (!ctx) {
+    ctx = makeContext(sinkId);
+    _ctxBySink.set(sinkId, ctx);
+  }
+  if (ctx.state === 'suspended') ctx.resume();
+  return ctx;
+}
+
+export async function playBase64Audio(base64Str, { sinkId = 'default' } = {}) {
   const binary = atob(base64Str);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const ctx = getAudioContext();
+  const ctx = getAudioContext(sinkId);
   const buf = await ctx.decodeAudioData(bytes.buffer.slice(0));
   return new Promise((resolve) => {
     const src = ctx.createBufferSource();

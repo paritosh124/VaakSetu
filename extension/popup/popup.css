@@ -79,3 +79,11 @@ button.primary:disabled { opacity: 0.5; cursor: default; }
 footer { margin-top: 16px; padding-top: 12px; border-top: 1px solid #2a2750; }
 .hint { margin: 0; font-size: 11px; color: #8E8AA0; line-height: 1.4; }
 .hint b { color: #EDE9F5; }
+
+.hint-inline {
+  display: block;
+  font-size: 10px;
+  color: #8E8AA0;
+  margin-top: 6px;
+  line-height: 1.4;
+}

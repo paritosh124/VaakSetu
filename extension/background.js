@@ -29,11 +29,14 @@ async function closeOffscreen() {
 }
 
 async function startSession(tabId) {
-  const cfg = await chrome.storage.local.get(['agentLang','customerLang','agentVoice','customerVoice']);
+  const cfg = await chrome.storage.local.get([
+    'agentLang','customerLang','agentVoice','customerVoice','outputSinkId',
+  ]);
   const agentLang     = cfg.agentLang    || 'en-IN';
   const customerLang  = cfg.customerLang || 'hi-IN';
   const agentVoice    = cfg.agentVoice   || 'male';
   const customerVoice = cfg.customerVoice|| 'female';
+  const outputSinkId  = cfg.outputSinkId || 'default';
 
   // getMediaStreamId must be called while a user-gesture context is alive.
   // Popup click → runtime.sendMessage → this handler — the gesture is still
@@ -49,7 +52,7 @@ async function startSession(tabId) {
     to: 'offscreen',
     cmd: 'init',
     streamId, tabId,
-    agentLang, customerLang, agentVoice, customerVoice,
+    agentLang, customerLang, agentVoice, customerVoice, outputSinkId,
   });
 
   activeTabId = tabId;
@@ -91,6 +94,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       // Widget → offscreen commands.
       if (msg?.type === 'recordCustomer' || msg?.type === 'recordAgent' || msg?.type === 'stopRecord') {
+        await chrome.runtime.sendMessage({ to: 'offscreen', cmd: msg.type });
+        sendResponse({ ok: true });
+        return;
+      }
+      if (msg?.type === 'goLive' || msg?.type === 'stopGoLive') {
         await chrome.runtime.sendMessage({ to: 'offscreen', cmd: msg.type });
         sendResponse({ ok: true });
         return;

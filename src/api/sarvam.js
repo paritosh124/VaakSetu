@@ -49,7 +49,12 @@ export async function speechToText({ audioBlob, languageCode, mode = 'transcribe
 // ─── Translate ───────────────────────────────────────────────────────────────
 // Mayura only supports English ↔ Indian languages (not Indian ↔ Indian direct).
 // We always translate from/to 'en-IN' as the pivot language.
-export async function translateText({ text, sourceLang, targetLang, apiKey }) {
+// Mayura's `input` field caps at 1000 chars per request. Long utterances need
+// to be chunked and recombined; sentence-boundary splits keep each chunk
+// translatable in isolation without losing meaning.
+const MAX_TRANSLATE_CHARS = 900;
+
+async function translateOne({ text, sourceLang, targetLang, apiKey }) {
   const res = await fetch(`${BASE}/translate`, {
     method: 'POST',
     headers: {
@@ -71,8 +76,17 @@ export async function translateText({ text, sourceLang, targetLang, apiKey }) {
   }
 
   const data = await res.json();
-  // Response field may be translated_text or translation depending on version
   return data.translated_text ?? data.translation ?? data.output ?? '';
+}
+
+export async function translateText({ text, sourceLang, targetLang, apiKey }) {
+  const chunks = chunkText(text, MAX_TRANSLATE_CHARS);
+  if (chunks.length === 1) return translateOne({ text: chunks[0], sourceLang, targetLang, apiKey });
+  const out = [];
+  for (const c of chunks) {
+    out.push(await translateOne({ text: c, sourceLang, targetLang, apiKey }));
+  }
+  return out.join(' ');
 }
 
 // ─── Text to Speech ──────────────────────────────────────────────────────────

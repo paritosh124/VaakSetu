@@ -18,6 +18,8 @@
 
   let root = null;
   let recording = null;
+  let live = false;
+  const partialBubbles = {}; // who -> element
 
   function build() {
     root = document.createElement('div');
@@ -30,8 +32,11 @@
       <div class="vs-status"></div>
       <div class="vs-feed"></div>
       <div class="vs-controls">
-        <button class="vs-btn vs-customer" data-who="customer">Customer speaks<small id="vs-cust-label"></small></button>
-        <button class="vs-btn vs-agent"    data-who="agent">Agent speaks<small id="vs-agent-label"></small></button>
+        <button class="vs-btn vs-ptt vs-customer" data-who="customer">Customer speaks<small id="vs-cust-label"></small></button>
+        <button class="vs-btn vs-ptt vs-agent"    data-who="agent">Agent speaks<small id="vs-agent-label"></small></button>
+      </div>
+      <div class="vs-live-row">
+        <button class="vs-golive">Go Live — hands-free</button>
       </div>
     `;
     document.documentElement.appendChild(root);
@@ -40,7 +45,7 @@
       chrome.runtime.sendMessage({ type: 'requestStop' }).catch(() => {});
     });
 
-    for (const btn of root.querySelectorAll('.vs-btn')) {
+    for (const btn of root.querySelectorAll('.vs-ptt')) {
       const who = btn.dataset.who;
       const onDown = (e) => { e.preventDefault(); startTalk(who, btn); };
       const onUp   = (e) => { e.preventDefault(); stopTalk(btn); };
@@ -51,6 +56,8 @@
       btn.addEventListener('touchend',   onUp,   { passive: false });
       btn.addEventListener('touchcancel',onUp,   { passive: false });
     }
+
+    root.querySelector('.vs-golive').addEventListener('click', toggleGoLive);
 
     makeDraggable(root, root.querySelector('.vs-head'));
   }
@@ -75,6 +82,7 @@
 
   function appendMessage(msg) {
     if (!root) return;
+    clearPartial(msg.who);
     const feed = root.querySelector('.vs-feed');
     const el = document.createElement('div');
     el.className = `vs-msg ${msg.who === 'customer' ? 'vs-customer' : ''}`;
@@ -91,6 +99,47 @@
     }
     feed.appendChild(el);
     feed.scrollTop = feed.scrollHeight;
+  }
+
+  function showPartial(who, text) {
+    if (!root || !text) return;
+    const feed = root.querySelector('.vs-feed');
+    let bubble = partialBubbles[who];
+    if (!bubble) {
+      bubble = document.createElement('div');
+      bubble.className = `vs-partial ${who === 'customer' ? 'vs-customer' : 'vs-agent'}`;
+      feed.appendChild(bubble);
+      partialBubbles[who] = bubble;
+    }
+    bubble.textContent = text;
+    feed.scrollTop = feed.scrollHeight;
+  }
+
+  function clearPartial(who) {
+    if (who && partialBubbles[who]) {
+      partialBubbles[who].remove();
+      delete partialBubbles[who];
+      return;
+    }
+    for (const k of Object.keys(partialBubbles)) {
+      partialBubbles[k].remove();
+      delete partialBubbles[k];
+    }
+  }
+
+  function toggleGoLive() {
+    const type = live ? 'stopGoLive' : 'goLive';
+    chrome.runtime.sendMessage({ type }).catch(() => {});
+  }
+
+  function setLive(on) {
+    live = !!on;
+    if (!root) return;
+    const btn = root.querySelector('.vs-golive');
+    btn.textContent = live ? 'Leave live conversation' : 'Go Live — hands-free';
+    btn.classList.toggle('vs-live-on', live);
+    root.querySelectorAll('.vs-ptt').forEach((b) => { b.disabled = live; });
+    if (!live) clearPartial();
   }
 
   function startTalk(who, btn) {
@@ -134,10 +183,12 @@
     if (!msg || !msg.event) return;
     switch (msg.event) {
       case 'show':    show(msg); break;
-      case 'hide':    hide();    break;
-      case 'ready':   setStatus('Ready. Hold a button while someone speaks.'); break;
+      case 'hide':    hide(); setLive(false); break;
+      case 'ready':   setStatus('Ready. Hold a button or click Go Live.'); break;
       case 'status':  setStatus(msg.text || ''); break;
       case 'message': appendMessage(msg); setStatus(''); break;
+      case 'partial': showPartial(msg.who, msg.text || ''); break;
+      case 'goLive':  setLive(!!msg.on); break;
       case 'error':   setStatus(msg.error, true); break;
     }
   });
