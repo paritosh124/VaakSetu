@@ -31,16 +31,18 @@ async function closeOffscreen() {
 async function startSession(tabId) {
   const cfg = await chrome.storage.local.get([
     'agentLang','customerLang','agentVoice','customerVoice',
-    'sinkAgent','sinkCustomer','outputSinkId',
+    'micDeviceId','sinkAgent','sinkCustomer','outputSinkId',
   ]);
   const agentLang     = cfg.agentLang    || 'en-IN';
   const customerLang  = cfg.customerLang || 'hi-IN';
   const agentVoice    = cfg.agentVoice   || 'male';
   const customerVoice = cfg.customerVoice|| 'female';
+  // micDeviceId  = which input device VaakSetu captures from (avoid defaulting
+  //                to a virtual cable that Windows may have flipped to system default).
   // sinkAgent    = where agent-speech translation plays (→ customer via Meet mic; usually VCC).
   // sinkCustomer = where customer-speech translation plays (→ agent's headphones).
-  // Migrate the old single-sink preference onto sinkAgent (that's the one
-  // previously used to feed Meet); sinkCustomer defaults to the headphones.
+  // Migrate the old single-sink preference onto sinkAgent.
+  const micDeviceId  = cfg.micDeviceId  ?? 'default';
   const sinkAgent    = cfg.sinkAgent    ?? cfg.outputSinkId ?? 'default';
   const sinkCustomer = cfg.sinkCustomer ?? 'default';
 
@@ -59,7 +61,7 @@ async function startSession(tabId) {
     cmd: 'init',
     streamId, tabId,
     agentLang, customerLang, agentVoice, customerVoice,
-    sinkAgent, sinkCustomer,
+    micDeviceId, sinkAgent, sinkCustomer,
   });
 
   activeTabId = tabId;

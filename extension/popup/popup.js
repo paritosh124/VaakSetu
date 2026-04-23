@@ -4,6 +4,7 @@ const agentLangEl    = document.getElementById('agentLang');
 const customerLangEl = document.getElementById('customerLang');
 const agentVoiceEl   = document.getElementById('agentVoice');
 const custVoiceEl    = document.getElementById('customerVoice');
+const micDeviceEl    = document.getElementById('micDeviceId');
 const sinkAgentEl    = document.getElementById('sinkAgent');
 const sinkCustomerEl = document.getElementById('sinkCustomer');
 const toggleBtn      = document.getElementById('toggleBtn');
@@ -29,21 +30,22 @@ const DEFAULTS = {
   customerLang: 'hi-IN',
   agentVoice:   'male',
   customerVoice:'female',
+  micDeviceId:  'default',  // which mic VaakSetu captures from (avoid picking up a virtual cable)
   sinkAgent:    'default',  // where agent-speech translation plays (→ Meet's mic; usually VCC)
   sinkCustomer: 'default',  // where customer-speech translation plays (→ agent's ears; headphones)
 };
 
-async function fillOutputDevices(selectEl, selected) {
+async function fillDevices(selectEl, kind, selected) {
   // enumerateDevices needs mic permission to reveal labels; if denied we still
   // list generic device IDs so the user can pick by position.
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
-    const outs = devices.filter((d) => d.kind === 'audiooutput');
+    const outs = devices.filter((d) => d.kind === kind);
     for (const d of outs) {
       if (d.deviceId === 'default') continue;
       const opt = document.createElement('option');
       opt.value = d.deviceId;
-      opt.textContent = d.label || `Output ${d.deviceId.slice(0, 8)}`;
+      opt.textContent = d.label || `${kind === 'audioinput' ? 'Mic' : 'Output'} ${d.deviceId.slice(0, 8)}`;
       if (d.deviceId === selected) opt.selected = true;
       selectEl.appendChild(opt);
     }
@@ -56,19 +58,19 @@ async function fillOutputDevices(selectEl, selected) {
 async function init() {
   const saved = await chrome.storage.local.get([
     'agentLang','customerLang','agentVoice','customerVoice',
-    'sinkAgent','sinkCustomer','outputSinkId','running',
+    'micDeviceId','sinkAgent','sinkCustomer','outputSinkId','running',
   ]);
   fillLangs(agentLangEl,    saved.agentLang    || DEFAULTS.agentLang);
   fillLangs(customerLangEl, saved.customerLang || DEFAULTS.customerLang);
   agentVoiceEl.value = saved.agentVoice   || DEFAULTS.agentVoice;
   custVoiceEl.value  = saved.customerVoice|| DEFAULTS.customerVoice;
-  // Migrate old single-sink preference to the "customer hears" side (it was the
-  // only output, and most users previously aimed that at a VCC / headphones).
+  const savedMic          = saved.micDeviceId  ?? DEFAULTS.micDeviceId;
   const savedSinkAgent    = saved.sinkAgent    ?? saved.outputSinkId ?? DEFAULTS.sinkAgent;
   const savedSinkCustomer = saved.sinkCustomer ?? DEFAULTS.sinkCustomer;
   await Promise.all([
-    fillOutputDevices(sinkAgentEl,    savedSinkAgent),
-    fillOutputDevices(sinkCustomerEl, savedSinkCustomer),
+    fillDevices(micDeviceEl,    'audioinput',  savedMic),
+    fillDevices(sinkAgentEl,    'audiooutput', savedSinkAgent),
+    fillDevices(sinkCustomerEl, 'audiooutput', savedSinkCustomer),
   ]);
 
   setRunning(!!saved.running);
@@ -77,6 +79,7 @@ async function init() {
   customerLangEl.addEventListener('change', (e) => chrome.storage.local.set({ customerLang: e.target.value }));
   agentVoiceEl.addEventListener('change',   (e) => chrome.storage.local.set({ agentVoice:   e.target.value }));
   custVoiceEl.addEventListener('change',    (e) => chrome.storage.local.set({ customerVoice:e.target.value }));
+  micDeviceEl.addEventListener('change',    (e) => chrome.storage.local.set({ micDeviceId:  e.target.value }));
   sinkAgentEl.addEventListener('change',    (e) => chrome.storage.local.set({ sinkAgent:    e.target.value }));
   sinkCustomerEl.addEventListener('change', (e) => chrome.storage.local.set({ sinkCustomer: e.target.value }));
 

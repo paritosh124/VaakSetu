@@ -36,6 +36,18 @@
   </section>
 
   <section class="row">
+    <label>Your microphone</label>
+    <select id="micDeviceId">
+      <option value="default">System default</option>
+    </select>
+    <small class="hint-inline">
+      Pick your <b>physical</b> mic. On Windows, installing VB-Cable often
+      flips the system default to CABLE Output — that's silent. Select your
+      headset mic here to avoid that trap.
+    </small>
+  </section>
+
+  <section class="row">
     <label>Customer hears (→ Meet's mic)</label>
     <select id="sinkAgent">
       <option value="default">System default</option>

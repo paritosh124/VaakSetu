@@ -633,13 +633,22 @@ Tab-audio passthrough:
 Required external setup (Windows example — macOS uses BlackHole similarly):
 1. Install **VB-Audio Virtual Cable** (free, one driver).
 2. In the VaakSetu popup:
+   - `Your microphone` → your physical headset / laptop mic (NOT CABLE Output)
    - `Customer hears (→ Meet's mic)` → **CABLE Input (VB-Audio Virtual Cable)**
    - `You hear` → your headphones
 3. In Google Meet → Settings → Audio:
    - Microphone → **CABLE Output (VB-Audio Virtual Cable)**
    - Speakers → your headphones (same as VaakSetu's "You hear")
-4. Keep your system mic as the default input — VaakSetu captures it via
-   `getUserMedia` directly; Meet never sees it.
+
+### The "silent mic" trap
+Installing a virtual audio cable often flips Windows' system default input
+to CABLE Output, because it's the newest device. If VaakSetu were relying
+on `getUserMedia({ audio: true })` (system default), it would capture the
+silent virtual cable instead of the agent's real mic — RMS ~1, no speech
+ever detected. The popup therefore exposes an explicit `micDeviceId`
+selector, and offscreen captures via `getUserMedia({ audio: { deviceId:
+{ exact: id } } })`. A log line `[vaaksetu] mic captured from: <label>`
+confirms which device the track actually bound to.
 
 ### Streaming STT in the extension
 - Ported to `extension/lib/api/sarvam-streaming.js`. Uses `self.AudioContext`

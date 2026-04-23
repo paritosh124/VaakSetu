@@ -71,9 +71,31 @@ function resumePassthrough() {
 
 async function ensureMicStream() {
   if (micStream) return micStream;
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
+  const devId = config?.micDeviceId;
+  const audio = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+  // Only pin a specific device when the user picked one explicitly.
+  // `default` means "let Chrome pick the system default" — and Chrome picks
+  // at track-creation time, so if the user later changes the OS default we
+  // still capture from the one they intended when they clicked Start.
+  if (devId && devId !== 'default') audio.deviceId = { exact: devId };
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio });
+  } catch (err) {
+    if (devId && devId !== 'default') {
+      console.warn('[vaaksetu] mic deviceId unavailable, retrying with default:', err?.message);
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } else {
+      throw err;
+    }
+  }
+  const track = micStream.getAudioTracks()[0];
+  console.log('[vaaksetu] mic captured from:', track?.label || '(unknown)');
   return micStream;
 }
 
