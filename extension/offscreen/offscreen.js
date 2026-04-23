@@ -452,8 +452,14 @@ async function endCapture(who) {
   }
   activeCapture = null;
 
+  // Capture the speech-end timestamp BEFORE awaiting the streamer stop so
+  // the per-turn timing logs include any STT-finalisation latency.
+  const endedAt = Date.now();
+
   let pivotText = '';
+  const tStreamStop = Date.now();
   try { if (cap.streamer) pivotText = await cap.streamer.stop(); } catch {}
+  console.log(`[vaaksetu timing ${who}] streamer.stop() took ${Date.now() - tStreamStop}ms`);
 
   let blob = null;
   try {
@@ -461,7 +467,7 @@ async function endCapture(who) {
     blob = await cap.blobPromise;
   } catch {}
 
-  turnQueue.push({ who, pivotText, blob, endedAt: Date.now() });
+  turnQueue.push({ who, pivotText, blob, endedAt });
   post('partial', { text: '', clear: true });
   pumpQueue();
 }
@@ -492,6 +498,9 @@ async function pumpQueue() {
       console.log(`[vaaksetu timing ${who}] +${Date.now() - endedAt}ms ${msg}`);
     const onStep = (_id, msg) => { latencyStep(msg); post('status', { text: msg }); };
     const onText = (pivot, translated) => {
+      // Log both so the user can tell STT-quality issues from translation-quality.
+      console.log(`[vaaksetu text ${who}] pivot (${sourceLang}): ${JSON.stringify(pivot)}`);
+      console.log(`[vaaksetu text ${who}] final (${targetLang}): ${JSON.stringify(translated)}`);
       post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText: pivot, translatedText: translated });
     };
 

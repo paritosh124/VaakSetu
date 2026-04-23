@@ -115,7 +115,13 @@ export class SarvamStreamingSTT {
     this._sourceNode.connect(this._workletNode);
   }
 
-  async stop(timeoutMs = 4000) {
+  // The biggest latency win in Go Live: don't wait for Sarvam's final
+  // transcript if we already have a good partial. Sarvam's "final" is
+  // typically the last partial with minor cleanup (punctuation, casing);
+  // it can arrive anywhere from 100ms to several seconds after we close the
+  // socket. Returning `_lastPartial` immediately shaves 1–4s off each turn.
+  // If the final happens to arrive within `maxWaitMs`, prefer it.
+  async stop(maxWaitMs = 250) {
     this._stopped = true;
     try { this._sourceNode?.disconnect(); } catch {}
     try { this._workletNode?.disconnect(); } catch {}
@@ -128,10 +134,24 @@ export class SarvamStreamingSTT {
       this._ws.close(1000, 'end-of-speech');
     }
 
-    const timeout = new Promise((resolve) => setTimeout(() => resolve(this._lastPartial), timeoutMs));
-    const result = await Promise.race([this._finalPromise, timeout]);
+    if (this._lastPartial) {
+      const cleanFinal = Promise.race([
+        this._finalPromise,
+        new Promise((r) => setTimeout(() => r(this._lastPartial), maxWaitMs)),
+      ]);
+      const result = await cleanFinal;
+      this._ws = null;
+      return (result || this._lastPartial || '').trim();
+    }
+
+    // No partial at all — a very short utterance. Give the server a bit
+    // more time since we have nothing to fall back on.
+    const result = await Promise.race([
+      this._finalPromise,
+      new Promise((r) => setTimeout(() => r(''), 1200)),
+    ]);
     this._ws = null;
-    return result || '';
+    return (result || '').trim();
   }
 
   destroy() {

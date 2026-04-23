@@ -137,11 +137,19 @@ export class SarvamStreamingSTT {
   }
 
   /**
-   * Stop recording and wait for the final transcript from Sarvam.
-   * @param {number} [timeoutMs=4000]
-   * @returns {Promise<string>} final transcript (English pivot or verbatim)
+   * Stop recording and return the transcript.
+   *
+   * The biggest latency win in Go Live / auto-stop: don't block on Sarvam's
+   * explicit "final" message when we already have a good partial. Sarvam's
+   * final is typically the last partial with punctuation/casing cleanup, and
+   * it can arrive anywhere from 100ms to several seconds after socket close.
+   * Returning `_lastPartial` immediately shaves 1–4s off each turn. If the
+   * final happens to arrive within `maxWaitMs`, we use that instead.
+   *
+   * @param {number} [maxWaitMs=250]  brief grace window for a cleaner final
+   * @returns {Promise<string>}       English pivot (mode=translate) or verbatim text
    */
-  async stop(timeoutMs = 4000) {
+  async stop(maxWaitMs = 250) {
     this._stopped = true;
 
     // Disconnect audio pipeline
@@ -157,14 +165,24 @@ export class SarvamStreamingSTT {
       this._ws.close(1000, 'end-of-speech');
     }
 
-    // Race: final transcript vs timeout fallback
-    const timeout = new Promise((resolve) =>
-      setTimeout(() => resolve(this._lastPartial), timeoutMs)
-    );
+    if (this._lastPartial) {
+      // Fast path: race the final against a short window; fall back to partial.
+      const result = await Promise.race([
+        this._finalPromise,
+        new Promise((r) => setTimeout(() => r(this._lastPartial), maxWaitMs)),
+      ]);
+      this._ws = null;
+      return (result || this._lastPartial || '').trim();
+    }
 
-    const result = await Promise.race([this._finalPromise, timeout]);
+    // No partial at all — very short utterance. Give the server a bit more
+    // time since we have nothing to fall back on.
+    const result = await Promise.race([
+      this._finalPromise,
+      new Promise((r) => setTimeout(() => r(''), 1200)),
+    ]);
     this._ws = null;
-    return result || '';
+    return (result || '').trim();
   }
 
   destroy() {
