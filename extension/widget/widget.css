@@ -29,15 +29,19 @@
   gap: 8px;
 }
 #vaaksetu-widget .vs-title { flex: 1; font-weight: 600; color: #F5A623; font-size: 13px; }
+#vaaksetu-widget .vs-download,
 #vaaksetu-widget .vs-close {
   background: transparent;
   border: none;
   color: #8E8AA0;
   cursor: pointer;
-  font-size: 18px;
-  padding: 0 4px;
+  font-size: 16px;
+  padding: 0 6px;
   line-height: 1;
 }
+#vaaksetu-widget .vs-close { font-size: 18px; }
+#vaaksetu-widget .vs-download:hover,
+#vaaksetu-widget .vs-close:hover { color: #EDE9F5; }
 
 #vaaksetu-widget .vs-status {
   padding: 6px 12px;

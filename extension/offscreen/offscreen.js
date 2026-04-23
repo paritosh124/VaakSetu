@@ -2,13 +2,14 @@
 //
 // Responsibilities:
 //   • Capture tab audio (customer) and mic audio (agent).
-//   • Pipe tab audio to speakers so the call stays audible.
 //   • Push-to-talk: start/stop recording on command, run batch pipeline.
 //   • Go Live (hands-free): silence-detect on both streams; while someone
 //     speaks, stream audio to Sarvam WebSocket STT and emit partials. On
 //     silence, stop the streamer, grab the final pivot, run translate+TTS.
 //     Queue turns so simultaneous speech doesn't overlap.
 //   • Route TTS playback to a user-selected sinkId (VB-Cable etc.).
+// The Meet tab itself is muted by background.js (chrome.tabs.update) so the
+// agent hears only translated audio, never the raw customer voice.
 import { translateAudio, pivotToSpeech } from '../lib/pipeline.js';
 import { getLang, isIndianLang } from '../lib/config.js';
 import { SarvamStreamingSTT, supportsStreamingSTT } from '../lib/api/sarvam-streaming.js';
@@ -16,8 +17,6 @@ import { SarvamStreamingSTT, supportsStreamingSTT } from '../lib/api/sarvam-stre
 let config = null;
 let tabStream = null;
 let micStream = null;
-let passthroughCtx = null;
-let passthroughSrc = null;
 
 // Per-turn sink lookup.
 //   who === 'agent'    → agent spoke, translation goes to the CUSTOMER (via
@@ -48,25 +47,17 @@ function post(ev, extra = {}) {
 
 async function ensureTabStream(streamId) {
   if (tabStream) return tabStream;
+  // getUserMedia with chromeMediaSource:'tab' captures the tab audio without
+  // muting the tab — that was an older tabCapture.capture() behavior that no
+  // longer holds for getMediaStreamId. We don't hook up a passthrough here:
+  // background.js mutes the tab itself via chrome.tabs.update, which is the
+  // clean way to keep the tab silent to the user while its audio still flows
+  // into this stream for analysis.
   tabStream = await navigator.mediaDevices.getUserMedia({
     audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } },
     video: false,
   });
-  // tabCapture auto-mutes the source tab. Pipe it back to the agent's ears by
-  // default so push-to-talk stays usable (they hear the raw customer between
-  // taps). Disconnected while Go Live is active — in live mode the customer's
-  // raw voice would fight the translation.
-  passthroughCtx = new AudioContext();
-  passthroughSrc = passthroughCtx.createMediaStreamSource(tabStream);
-  passthroughSrc.connect(passthroughCtx.destination);
   return tabStream;
-}
-
-function pausePassthrough() {
-  try { passthroughSrc?.disconnect(); } catch {}
-}
-function resumePassthrough() {
-  try { passthroughSrc?.connect(passthroughCtx.destination); } catch {}
 }
 
 async function ensureMicStream() {
@@ -183,23 +174,33 @@ async function stopRecording() {
 async function runBatchTurn({ who, blob }) {
   const sourceLang = who === 'customer' ? config.customerLang : config.agentLang;
   const targetLang = who === 'customer' ? config.agentLang    : config.customerLang;
-  const voiceGender = who === 'customer' ? config.agentVoice : config.customerVoice;
+  // Speaker-preference: agentVoice is the voice used WHEN agent speaks (heard
+  // by the customer); customerVoice is used when customer speaks (heard by
+  // agent). Matches the popup's UI grouping ("Agent voice" is under "Agent
+  // speaks") which is what users naturally expect.
+  const voiceGender = who === 'agent' ? config.agentVoice : config.customerVoice;
 
   const srcLabel = `${getLang(sourceLang).native} (${who === 'customer' ? 'Customer' : 'Agent'})`;
   const tgtLabel = `${getLang(targetLang).native} (${who === 'customer' ? 'Agent' : 'Customer'})`;
   const messageId = Date.now();
+  const t0 = Date.now();
 
   try {
     const result = await translateAudio({
       audioBlob: blob,
       sourceLang, targetLang, voiceGender,
       sinkId: sinkFor(who),
-      onStep: (id, msg) => post('status', { text: msg }),
+      onStep: (id, msg) => {
+        console.log(`[vaaksetu timing ${who}] +${Date.now() - t0}ms ${msg}`);
+        post('status', { text: msg });
+      },
       onText: (pivotText, translatedText) => {
         post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText, translatedText });
       },
     });
+    const tReady = Date.now() - t0;
     await result.audioPromise;
+    console.log(`[vaaksetu timing ${who}] READY +${tReady}ms | PLAYED +${Date.now() - t0}ms`);
     post('status', { text: '' });
   } catch (err) {
     post('error', { error: err.message || String(err) });
@@ -221,13 +222,24 @@ async function runBatchTurn({ who, blob }) {
 //   5. During TTS playback, the opposite VAD is paused so the translation
 //      doesn't re-trigger a turn through the call audio.
 
-// Match the webapp's VAD tuning. 10 is sensitive enough for quiet mics but
-// still clears typical room noise. If a site still can't trigger, drop to 8.
-const SILENCE_THRESHOLD = 10;
-const SILENCE_MS = 1500;
-const MIN_SPEECH_MS = 400;
+// VAD tuning:
+//   SILENCE_THRESHOLD  — minimum RMS to count a tick as active. Dropped to 6
+//                        because AGC-processed mic signals often sit around
+//                        8-15 even during speech.
+//   MIN_SPEECH_MS      — accumulated active time (NOT consecutive) before
+//                        arming. Brief inter-word pauses are tolerated.
+//   SILENCE_MS         — sustained silence that closes the turn. 900ms is the
+//                        biggest latency lever in the pipeline — user sees a
+//                        translation this much faster after they stop speaking.
+//   GAP_TOLERANCE_MS   — how long an inactive run has to be before we reset
+//                        the active accumulator (only while not yet armed).
+const SILENCE_THRESHOLD = 6;
+const SILENCE_MS = 900;
+const MIN_SPEECH_MS = 320;
+const GAP_TOLERANCE_MS = 250;
+const NO_SIGNAL_WARN_MS = 6000;
 
-function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd }) {
+function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd, onNoSignal }) {
   const ac = new AudioContext();
   // Offscreen docs don't inherit the widget's click as a user gesture, so
   // new AudioContext() may be created in "suspended" state. Without
@@ -238,9 +250,9 @@ function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd }) {
   const src = ac.createMediaStreamSource(stream);
   const analyser = ac.createAnalyser();
   analyser.fftSize = 512;
-  // Terminate the graph into a muted gain → destination. Some Chromium
-  // builds prune graphs that don't reach destination; this keeps the
-  // analyser "hot" regardless.
+  // Terminate graph into a muted gain → destination. Some Chromium builds
+  // prune subgraphs that don't reach destination, which would freeze the
+  // analyser data.
   const mute = ac.createGain();
   mute.gain.value = 0;
   src.connect(analyser);
@@ -248,19 +260,24 @@ function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd }) {
   mute.connect(ac.destination);
 
   const buf = new Uint8Array(analyser.fftSize);
-  let speakingSince = 0;
-  let silentSince = 0;
-  let speaking = false;
+  let activeMs = 0;
+  let silentMs = 0;
   let armed = false;
   let paused = false;
-
-  // Periodic RMS sample so you can see in devtools whether the stream is
-  // even producing audio. Logs every ~2s while not armed.
+  let lastTickAt = Date.now();
   let lastDebugAt = 0;
   let peakRms = 0;
+  let noSignalMs = 0;
+  let warnedNoSignal = false;
 
   const interval = setInterval(() => {
+    const now = Date.now();
+    // Cap dt so a backgrounded tab doesn't dump one massive silent delta
+    // onto silentMs and falsely end a speech segment.
+    const dt = Math.min(200, now - lastTickAt);
+    lastTickAt = now;
     if (paused) return;
+
     analyser.getByteTimeDomainData(buf);
     let sum = 0;
     for (let i = 0; i < buf.length; i++) {
@@ -269,34 +286,40 @@ function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd }) {
     }
     const rms = Math.sqrt(sum / buf.length);
     peakRms = Math.max(peakRms, rms);
-    const now = Date.now();
     const active = rms >= SILENCE_THRESHOLD;
 
     if (now - lastDebugAt >= 2000) {
-      console.log(`[vaaksetu VAD ${who}] state=${ac.state} peakRms=${peakRms.toFixed(1)} threshold=${SILENCE_THRESHOLD} armed=${armed} speaking=${speaking}`);
+      console.log(`[vaaksetu VAD ${who}] state=${ac.state} peakRms=${peakRms.toFixed(1)} threshold=${SILENCE_THRESHOLD} armed=${armed} activeMs=${activeMs}`);
+      if (peakRms < 1.5) noSignalMs += (now - lastDebugAt); else noSignalMs = 0;
+      if (!warnedNoSignal && noSignalMs >= NO_SIGNAL_WARN_MS) {
+        warnedNoSignal = true;
+        console.warn(`[vaaksetu VAD ${who}] NO SIGNAL — check popup device picker`);
+        onNoSignal?.();
+      }
       lastDebugAt = now;
       peakRms = 0;
     }
 
     if (active) {
-      if (!speaking) { speaking = true; speakingSince = now; }
-      silentSince = 0;
-      if (!armed && now - speakingSince >= MIN_SPEECH_MS) {
+      activeMs += dt;
+      silentMs = 0;
+      if (!armed && activeMs >= MIN_SPEECH_MS) {
         armed = true;
-        console.log(`[vaaksetu VAD ${who}] speech-start (rms=${rms.toFixed(1)})`);
+        console.log(`[vaaksetu VAD ${who}] speech-start rms=${rms.toFixed(1)} activeMs=${activeMs}`);
         onSpeechStart?.();
       }
     } else {
-      if (speaking && !silentSince) silentSince = now;
-      if (armed && silentSince && now - silentSince >= SILENCE_MS) {
-        speaking = false;
+      silentMs += dt;
+      if (!armed) {
+        // Tolerate brief pauses between words; only reset the accumulator
+        // when silence runs longer than GAP_TOLERANCE_MS.
+        if (silentMs > GAP_TOLERANCE_MS) activeMs = 0;
+      } else if (silentMs >= SILENCE_MS) {
         armed = false;
-        silentSince = 0;
+        activeMs = 0;
+        silentMs = 0;
         console.log(`[vaaksetu VAD ${who}] speech-end`);
         onSpeechEnd?.();
-      } else if (!armed) {
-        speaking = false;
-        silentSince = 0;
       }
     }
   }, 60);
@@ -309,8 +332,14 @@ function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd }) {
       try { mute.disconnect(); } catch {}
       try { ac.close(); } catch {}
     },
-    pause() { paused = true; speaking = false; armed = false; silentSince = 0; },
-    resume() { paused = false; speaking = false; armed = false; silentSince = 0; },
+    pause() { paused = true; activeMs = 0; silentMs = 0; armed = false; },
+    resume() {
+      paused = false;
+      activeMs = 0;
+      silentMs = 0;
+      armed = false;
+      lastTickAt = Date.now();
+    },
   };
 }
 
@@ -332,9 +361,6 @@ async function startGoLive() {
   turnQueue = [];
   processing = false;
   activeCapture = null;
-  // In live mode the translation replaces the raw customer audio — passthrough
-  // would otherwise fight it in the agent's ears.
-  pausePassthrough();
   post('goLive', { on: true });
   post('status', { text: '● Listening' });
 
@@ -343,12 +369,18 @@ async function startGoLive() {
     stream: tabStream,
     onSpeechStart: () => beginCapture('customer'),
     onSpeechEnd:   () => endCapture('customer'),
+    onNoSignal:    () => post('error', {
+      error: 'No customer audio reaching the extension. Is the Meet tab active and unmuted at the OS level?',
+    }),
   });
   vadLoops.agent = createVadLoop({
     who: 'agent',
     stream: micStream,
     onSpeechStart: () => beginCapture('agent'),
     onSpeechEnd:   () => endCapture('agent'),
+    onNoSignal:    () => post('error', {
+      error: 'No mic signal. Open the popup → "Your microphone" → pick your physical mic (not CABLE Output).',
+    }),
   });
 }
 
@@ -364,7 +396,6 @@ async function stopGoLive() {
   }
   turnQueue = [];
   processing = false;
-  resumePassthrough();
   post('goLive', { on: false });
   post('status', { text: '' });
   post('partial', { text: '', clear: true });
@@ -430,7 +461,7 @@ async function endCapture(who) {
     blob = await cap.blobPromise;
   } catch {}
 
-  turnQueue.push({ who, pivotText, blob });
+  turnQueue.push({ who, pivotText, blob, endedAt: Date.now() });
   post('partial', { text: '', clear: true });
   pumpQueue();
 }
@@ -441,10 +472,11 @@ async function pumpQueue() {
   if (!turn) return;
   processing = true;
 
-  const { who, pivotText, blob } = turn;
+  const { who, pivotText, blob, endedAt } = turn;
   const sourceLang = who === 'customer' ? config.customerLang : config.agentLang;
   const targetLang = who === 'customer' ? config.agentLang    : config.customerLang;
-  const voiceGender = who === 'customer' ? config.agentVoice : config.customerVoice;
+  // Speaker-preference (see runBatchTurn).
+  const voiceGender = who === 'agent' ? config.agentVoice : config.customerVoice;
   const srcLabel = `${getLang(sourceLang).native} (${who === 'customer' ? 'Customer' : 'Agent'})`;
   const tgtLabel = `${getLang(targetLang).native} (${who === 'customer' ? 'Agent' : 'Customer'})`;
   const messageId = Date.now();
@@ -455,29 +487,34 @@ async function pumpQueue() {
   post('status', { text: `● Translating (${who})…` });
 
   try {
+    // End-to-end latency — from VAD speech-end to end-of-playback.
+    const latencyStep = (msg) =>
+      console.log(`[vaaksetu timing ${who}] +${Date.now() - endedAt}ms ${msg}`);
+    const onStep = (_id, msg) => { latencyStep(msg); post('status', { text: msg }); };
+    const onText = (pivot, translated) => {
+      post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText: pivot, translatedText: translated });
+    };
+
     if (pivotText) {
       // Fast path: streaming STT already produced English pivot.
+      latencyStep('STT done (streaming)');
       const result = await pivotToSpeech({
         pivotText, sourceLang, targetLang, voiceGender,
-        sinkId: sinkFor(who),
-        onStep: (id, msg) => post('status', { text: msg }),
-        onText: (pivot, translated) => {
-          post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText: pivot, translatedText: translated });
-        },
+        sinkId: sinkFor(who), onStep, onText,
       });
+      const tReady = Date.now() - endedAt;
       await result.audioPromise;
+      console.log(`[vaaksetu timing ${who}] READY +${tReady}ms | PLAYED +${Date.now() - endedAt}ms`);
     } else if (blob && blob.size >= 1000) {
       // Intl source or streaming failed — batch pipeline off the MediaRecorder blob.
       const result = await translateAudio({
         audioBlob: blob,
         sourceLang, targetLang, voiceGender,
-        sinkId: sinkFor(who),
-        onStep: (id, msg) => post('status', { text: msg }),
-        onText: (pivot, translated) => {
-          post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText: pivot, translatedText: translated });
-        },
+        sinkId: sinkFor(who), onStep, onText,
       });
+      const tReady = Date.now() - endedAt;
       await result.audioPromise;
+      console.log(`[vaaksetu timing ${who}] READY +${tReady}ms | PLAYED +${Date.now() - endedAt}ms`);
     } else {
       post('status', { text: 'Too short — keep speaking.' });
     }
@@ -499,9 +536,7 @@ function stopAll() {
   chunks = [];
   try { tabStream?.getTracks()?.forEach((t) => t.stop()); } catch {}
   try { micStream?.getTracks()?.forEach((t) => t.stop()); } catch {}
-  try { passthroughSrc?.disconnect(); } catch {}
-  try { passthroughCtx?.close(); } catch {}
-  tabStream = micStream = passthroughCtx = passthroughSrc = null;
+  tabStream = micStream = null;
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

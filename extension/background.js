@@ -67,6 +67,14 @@ async function startSession(tabId) {
   activeTabId = tabId;
   await chrome.storage.local.set({ running: true, activeTabId: tabId });
 
+  // Silence the Meet tab at the OS audio sink so the agent only hears the
+  // translated output. `tabCapture` taps the audio pipeline upstream of the
+  // mute, so our capture stream still receives the customer's voice for
+  // analysis — this just stops Chrome from playing it to the speakers.
+  try { await chrome.tabs.update(tabId, { muted: true }); } catch (e) {
+    console.warn('[bg] could not mute tab', tabId, e?.message);
+  }
+
   // Tell the widget in that tab to become visible.
   try {
     await chrome.tabs.sendMessage(tabId, { event: 'show', agentLang, customerLang });
@@ -81,6 +89,8 @@ async function stopSession() {
   await closeOffscreen();
   if (activeTabId) {
     try { await chrome.tabs.sendMessage(activeTabId, { event: 'hide' }); } catch {}
+    // Restore the call tab's audio — the agent is no longer translating.
+    try { await chrome.tabs.update(activeTabId, { muted: false }); } catch {}
   }
   await chrome.storage.local.set({ running: false, activeTabId: null });
   activeTabId = null;

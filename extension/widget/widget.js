@@ -20,6 +20,7 @@
   let recording = null;
   let live = false;
   const partialBubbles = {}; // who -> element
+  const transcript = [];     // { ts, who, srcLabel, tgtLabel, pivotText, translatedText }
 
   function build() {
     root = document.createElement('div');
@@ -27,6 +28,7 @@
     root.innerHTML = `
       <div class="vs-head">
         <span class="vs-title">VaakSetu</span>
+        <button class="vs-download" title="Download transcript">⭳</button>
         <button class="vs-close" title="Close">×</button>
       </div>
       <div class="vs-status"></div>
@@ -44,6 +46,8 @@
     root.querySelector('.vs-close').addEventListener('click', () => {
       chrome.runtime.sendMessage({ type: 'requestStop' }).catch(() => {});
     });
+
+    root.querySelector('.vs-download').addEventListener('click', downloadTranscript);
 
     for (const btn of root.querySelectorAll('.vs-ptt')) {
       const who = btn.dataset.who;
@@ -83,6 +87,14 @@
   function appendMessage(msg) {
     if (!root) return;
     clearPartial(msg.who);
+    transcript.push({
+      ts: Date.now(),
+      who: msg.who,
+      srcLabel: msg.srcLabel || '',
+      tgtLabel: msg.tgtLabel || '',
+      pivotText: msg.pivotText || '',
+      translatedText: msg.translatedText || '',
+    });
     const feed = root.querySelector('.vs-feed');
     const el = document.createElement('div');
     el.className = `vs-msg ${msg.who === 'customer' ? 'vs-customer' : ''}`;
@@ -99,6 +111,31 @@
     }
     feed.appendChild(el);
     feed.scrollTop = feed.scrollHeight;
+  }
+
+  function downloadTranscript() {
+    if (!transcript.length) {
+      setStatus('No transcript yet — start a conversation first.', true);
+      return;
+    }
+    const lines = ['VaakSetu conversation transcript', '================================', ''];
+    for (const t of transcript) {
+      const when = new Date(t.ts).toLocaleString();
+      lines.push(`[${when}] ${t.srcLabel} → ${t.tgtLabel}`);
+      lines.push(`  ${t.translatedText}`);
+      if (t.pivotText && t.pivotText !== t.translatedText) lines.push(`  (pivot: ${t.pivotText})`);
+      lines.push('');
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    a.download = `vaaksetu-transcript-${stamp}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
 
   function showPartial(who, text) {
@@ -160,6 +197,7 @@
     let sx = 0, sy = 0, ox = 0, oy = 0, dragging = false;
     handle.addEventListener('mousedown', (e) => {
       if (e.target.classList.contains('vs-close')) return;
+      if (e.target.classList.contains('vs-download')) return;
       dragging = true;
       sx = e.clientX; sy = e.clientY;
       const rect = el.getBoundingClientRect();

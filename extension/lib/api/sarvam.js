@@ -91,27 +91,36 @@ function chunkText(text, maxLen = MAX_TTS_CHARS) {
   return chunks;
 }
 
+async function ttsChunk({ chunk, languageCode, speaker }) {
+  const res = await fetch(`${API_BASE}/text-to-speech`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      inputs: [chunk],
+      target_language_code: toNonSTTCode(languageCode),
+      speaker,
+      model: 'bulbul:v3',
+      pace: 1.0,
+    }),
+  });
+  if (!res.ok) throw new Error(`Sarvam TTS failed (${res.status}): ${await res.text().catch(() => res.statusText)}`);
+  const data = await res.json();
+  return data.audios?.[0] ?? data.audio ?? '';
+}
+
 // Returns an array of base64 audio strings — one per chunk. Callers should
-// play them sequentially via `playBase64Audio`.
-export async function textToSpeech({ text, languageCode, speaker = 'anand' }) {
+// play them sequentially via `playBase64Audio`. When `onChunk` is supplied
+// each chunk is delivered as soon as it's ready so the pipeline can start
+// playback of chunk N while chunks N+1…N+k are still in flight.
+export async function textToSpeech({ text, languageCode, speaker = 'anand', onChunk }) {
   const chunks = chunkText(text);
   const audios = [];
   for (const chunk of chunks) {
-    const res = await fetch(`${API_BASE}/text-to-speech`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        inputs: [chunk],
-        target_language_code: toNonSTTCode(languageCode),
-        speaker,
-        model: 'bulbul:v3',
-        pace: 1.0,
-      }),
-    });
-    if (!res.ok) throw new Error(`Sarvam TTS failed (${res.status}): ${await res.text().catch(() => res.statusText)}`);
-    const data = await res.json();
-    const b64 = data.audios?.[0] ?? data.audio ?? '';
-    if (b64) audios.push(b64);
+    const b64 = await ttsChunk({ chunk, languageCode, speaker });
+    if (b64) {
+      audios.push(b64);
+      onChunk?.(b64);
+    }
   }
   return audios;
 }

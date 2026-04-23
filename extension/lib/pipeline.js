@@ -62,15 +62,34 @@ export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGe
   }
   onText?.(pivotText, translatedText);
 
-  // Step 3: Text → Speech. Array-normalised to handle Bulbul chunking + single-shot ElevenLabs.
+  // Step 3: Text → Speech.
+  // Indian target: Bulbul is per-chunk and each chunk is ≤ a few hundred
+  // chars — we pipeline the requests into the playback queue so chunk 1 plays
+  // while chunk 2 is still on the wire. This is the single biggest TTS
+  // latency win for long utterances (a 3-chunk turn starts ~2× faster).
+  // Intl target: ElevenLabs returns a single mp3 so there's nothing to pipeline.
   step('tts', 'Generating voice…');
-  const audios = tgtIndian
-    ? await textToSpeech({ text: translatedText, languageCode: targetLang, speaker: SARVAM_VOICE[voiceGender] })
-    : [await elevenLabsTTS({ text: translatedText, voiceGender })];
+  let firstAudioAt = 0;
 
-  step('playing', 'Playing…');
   const audioPromise = (async () => {
-    for (const b64 of audios) {
+    if (tgtIndian) {
+      const playQueue = [];
+      let playChain = Promise.resolve();
+      const enqueue = (b64) => {
+        if (!firstAudioAt) { firstAudioAt = Date.now(); step('playing', 'Playing…'); }
+        playChain = playChain.then(() => playBase64Audio(b64, { sinkId }));
+        playQueue.push(playChain);
+      };
+      await textToSpeech({
+        text: translatedText,
+        languageCode: targetLang,
+        speaker: SARVAM_VOICE[voiceGender],
+        onChunk: enqueue,
+      });
+      await Promise.all(playQueue);
+    } else {
+      const b64 = await elevenLabsTTS({ text: translatedText, voiceGender });
+      step('playing', 'Playing…');
       if (b64) await playBase64Audio(b64, { sinkId });
     }
     step('done', '');
