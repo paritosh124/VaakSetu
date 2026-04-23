@@ -24,42 +24,50 @@ function post(ev, extra = {}) {
   chrome.runtime.sendMessage({ to: 'widget', tabId: config.tabId, event: ev, ...extra }).catch(() => {});
 }
 
+async function ensureTabStream(streamId) {
+  if (tabStream) return tabStream;
+  tabStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId },
+    },
+    video: false,
+  });
+  // Tab capture mutes the tab by default — route it back to the speakers.
+  passthroughCtx = new AudioContext();
+  const src = passthroughCtx.createMediaStreamSource(tabStream);
+  src.connect(passthroughCtx.destination);
+  return tabStream;
+}
+
+async function ensureMicStream() {
+  if (micStream) return micStream;
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+  return micStream;
+}
+
 async function init(cfg) {
   config = cfg;
-  try {
-    // Tab audio. Without chromeMediaSource:'tab' we'd get the wrong stream.
-    tabStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        mandatory: {
-          chromeMediaSource: 'tab',
-          chromeMediaSourceId: cfg.streamId,
-        },
-      },
-      video: false,
-    });
+  let tabOk = false, micOk = false, firstErr = null;
 
-    // Keep the call audible — tab capture by itself mutes the tab, so fan it
-    // back out to the speakers via an AudioContext.
-    passthroughCtx = new AudioContext();
-    const src = passthroughCtx.createMediaStreamSource(tabStream);
-    src.connect(passthroughCtx.destination);
+  try { await ensureTabStream(cfg.streamId); tabOk = true; }
+  catch (err) { firstErr = err; }
 
-    // Agent mic.
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
+  try { await ensureMicStream(); micOk = true; }
+  catch (err) { if (!firstErr) firstErr = err; }
 
-    post('ready', {
-      agentLang: cfg.agentLang,
-      customerLang: cfg.customerLang,
-    });
-  } catch (err) {
-    post('error', { error: `Audio capture failed: ${err.message || err}` });
-    throw err;
+  if (tabOk && micOk) {
+    post('ready', { agentLang: cfg.agentLang, customerLang: cfg.customerLang });
+  } else if (tabOk) {
+    post('ready', { agentLang: cfg.agentLang, customerLang: cfg.customerLang });
+    post('error', { error: `Mic not ready: ${firstErr?.message || firstErr}. Agent button will retry.` });
+  } else {
+    post('error', { error: `Audio capture failed: ${firstErr?.message || firstErr}` });
   }
 }
 
@@ -71,10 +79,22 @@ function pickMimeType() {
   return '';
 }
 
-function startRecording(who) {
+async function startRecording(who) {
   if (recording) return; // already capturing
-  const stream = who === 'customer' ? tabStream : micStream;
-  if (!stream) { post('error', { error: 'Audio not initialised.' }); return; }
+
+  let stream;
+  try {
+    stream = who === 'customer'
+      ? await ensureTabStream(config?.streamId)
+      : await ensureMicStream();
+  } catch (err) {
+    post('error', {
+      error: who === 'agent'
+        ? `Microphone blocked: ${err.message}. Open the extension popup, click Start again, and allow mic when prompted.`
+        : `Tab audio unavailable: ${err.message}`,
+    });
+    return;
+  }
 
   chunks = [];
   const mimeType = pickMimeType();
@@ -153,8 +173,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
       if (msg.cmd === 'init')            await init(msg);
-      else if (msg.cmd === 'recordCustomer') startRecording('customer');
-      else if (msg.cmd === 'recordAgent')    startRecording('agent');
+      else if (msg.cmd === 'recordCustomer') await startRecording('customer');
+      else if (msg.cmd === 'recordAgent')    await startRecording('agent');
       else if (msg.cmd === 'stopRecord')     await stopRecording();
       else if (msg.cmd === 'stop')           stopAll();
       sendResponse({ ok: true });

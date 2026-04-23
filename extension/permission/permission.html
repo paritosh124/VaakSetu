@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>VaakSetu — Microphone permission</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 40px 32px;
+      font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      background: #0C0B1A;
+      color: #EDE9F5;
+      max-width: 560px;
+      margin: 0 auto;
+    }
+    h1 { color: #F5A623; font-size: 22px; margin: 0 0 8px; }
+    p { line-height: 1.5; font-size: 14px; color: #BDB9D0; }
+    .card { background: #151329; border-radius: 12px; padding: 20px 22px; margin-top: 18px; border: 1px solid #2a2750; }
+    button { padding: 10px 16px; background: #F5A623; color: #0C0B1A; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 14px; }
+    button.secondary { background: transparent; color: #BDB9D0; border: 1px solid #2a2750; margin-left: 8px; }
+    .status { font-size: 13px; margin-top: 12px; }
+    .status.ok   { color: #0FB8A9; }
+    .status.err  { color: #E5484D; }
+    code { background: #1f1c3d; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Allow microphone for VaakSetu</h1>
+  <p>
+    The extension needs microphone access to translate what the agent says.
+    Chrome is about to show a permission prompt near the address bar — click
+    <b>Allow</b>. Once granted, this tab closes automatically and the
+    translator starts.
+  </p>
+
+  <div class="card">
+    <button id="grantBtn">Grant microphone permission</button>
+    <button id="cancelBtn" class="secondary">Cancel</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <p style="margin-top: 24px; font-size: 12px; color: #8E8AA0;">
+    If you previously blocked mic access, open
+    <code>chrome://settings/content/microphone</code>,
+    find this extension, and switch it to Allow.
+  </p>
+
+  <script src="permission.js"></script>
+</body>
+</html>

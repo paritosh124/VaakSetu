@@ -59,6 +59,24 @@ function setRunning(running) {
   }
 }
 
+async function getMicState() {
+  // Returns 'granted' | 'prompt' | 'denied' | 'unknown'
+  try {
+    const res = await navigator.permissions.query({ name: 'microphone' });
+    return res.state;
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function openPermissionTab(tabId) {
+  // Chrome closes the popup the moment a native permission prompt steals focus,
+  // which rejects getUserMedia with "Permission dismissed". A normal extension
+  // tab stays alive through the prompt, so we route the grant through there.
+  const url = chrome.runtime.getURL(`permission/permission.html?tabId=${tabId}`);
+  await chrome.tabs.create({ url, active: true });
+}
+
 async function onToggle() {
   toggleBtn.disabled = true;
   const { running } = await chrome.storage.local.get('running');
@@ -70,9 +88,29 @@ async function onToggle() {
     } else {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab) throw new Error('No active tab.');
-      const resp = await chrome.runtime.sendMessage({ type: 'start', tabId: tab.id });
-      if (resp && resp.error) throw new Error(resp.error);
-      setRunning(true);
+
+      const state = await getMicState();
+      if (state === 'granted') {
+        // Permission already unlocked for this extension origin — start directly.
+        const resp = await chrome.runtime.sendMessage({ type: 'start', tabId: tab.id });
+        if (resp && resp.error) throw new Error(resp.error);
+        setRunning(true);
+        return;
+      }
+
+      if (state === 'denied') {
+        throw new Error(
+          'Microphone is blocked. Open chrome://settings/content/microphone, find this extension, set to Allow, then retry.'
+        );
+      }
+
+      // 'prompt' or 'unknown' → open dedicated permission tab; it will
+      // trigger Chrome's prompt, grant, send the start message, and mark
+      // running=true itself. We don't optimistically flag running here
+      // because denial/cancel would leave stale state.
+      statusLine.textContent = 'Opening permission tab — grant access there, then return.';
+      statusLine.classList.remove('error');
+      await openPermissionTab(tab.id);
     }
   } catch (err) {
     statusLine.textContent = err.message || String(err);

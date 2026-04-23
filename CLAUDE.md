@@ -19,11 +19,33 @@ VaakSetu (वाक् + सेतु = Voice Bridge) is a bidirectional real-ti
 - **Mayura** (`mayura:v1`) — Translation via `/translate`
 - **Bulbul v3** (`bulbul:v3`) — Text-to-Speech via `/text-to-speech`
 
-## OpenAI Models (International languages)
+## OpenAI Models (International languages) — fallback only
 - **Whisper** (`whisper-1`) — STT via `/v1/audio/transcriptions` and `/v1/audio/translations` (→ English)
 - **GPT-4o-mini** — Translation via `/v1/chat/completions`
 - **TTS-1** — Text-to-Speech via `/v1/audio/speech` (returns mp3 binary → converted to base64)
 - Voices: **Male** → `onyx`, **Female** → `nova`
+
+## Groq + ElevenLabs (preferred international pipeline)
+Used by default for any language pair involving an international language; the
+OpenAI pipeline remains as a last-resort fallback. Roughly 20–40× cheaper per
+minute than OpenAI with comparable quality.
+
+- **Groq Whisper** (`whisper-large-v3`) — STT via `/openai/v1/audio/transcriptions`
+  - **Important:** must use `whisper-large-v3`, NOT `whisper-large-v3-turbo` — turbo does not support the `/translations` endpoint. We transcribe first, then translate with Llama.
+  - Language param must be ISO-639-1 (`hi`, not `hi-IN`). Normalize via `sourceLang.split('-')[0]`.
+- **Groq Llama** (`llama-3.3-70b-versatile`) — Translation via `/openai/v1/chat/completions`
+  - The 8B variant hallucinates on translation tasks; 70B is reliable.
+  - Wrap user text in `<translate>...</translate>` XML tags so the model doesn't interpret a phrase like "give me tips" as an instruction to itself.
+  - `temperature: 0.0`, `max_tokens: 500`.
+  - System prompt: *"You are a translation engine. The user will send text inside `<translate>` tags. Translate that text to {targetLangName}. Output ONLY the translated text — no tags, no explanation, no extra content."*
+- **ElevenLabs Turbo v2.5** (`eleven_turbo_v2_5`) — TTS via `/v1/text-to-speech/{voiceId}`
+  - Male → `onwK4e9ZLuTAKqWW03F9` (Daniel), Female → `EXAVITQu4vr4xnSDxMaL` (Sarah)
+  - Returns raw mp3 binary → `arrayBufferToBase64()` → same `playBase64Audio` path
+
+If no ElevenLabs key is available, the pipeline falls back to browser-native
+`speechSynthesis` (`browserTTS` in `src/api/groq.js`). Quality is acceptable
+for European languages on desktop Chrome but poor for CJK/Arabic — the replay
+button is also disabled because the Web Speech API doesn't return audio data.
 
 ## Architecture — Dual Pipeline
 
@@ -34,17 +56,30 @@ English speech     → Saaras (mode="transcribe") → English text → Mayura (e
 Any → English      → Saaras (mode="translate")  → English text → Bulbul TTS (skip Mayura)
 ```
 
-### OpenAI pipeline (any pair involving an international language)
+### Groq + ElevenLabs pipeline (default international path)
+```
+Any speech → Groq Whisper (/transcriptions → original text) → Groq Llama (→ English)
+           → Groq Llama (English → target) → ElevenLabs Turbo v2.5
+Any → English → Groq Whisper → Groq Llama (→ English) → ElevenLabs (skip 2nd translate)
+```
+
+### OpenAI pipeline (fallback, only if no Groq key present)
 ```
 Any speech → Whisper (/translations → English pivot) → GPT-4o-mini (en→target) → TTS-1
 Any → English → Whisper (/translations → English) → TTS-1 (skip GPT)
 ```
 
-### Routing logic
+### Routing logic (three-way)
 ```js
-const useOpenAI = !isIndianLang(sourceLang) || !isIndianLang(targetLang);
+const needsIntl = !isIndianLang(sourceLang) || !isIndianLang(targetLang);
+// effectiveGroqKey falls back to import.meta.env.VITE_GROQ_API_KEY so a
+// fresh tab with cleared state still picks the right pipeline.
+const effectiveGroqKey = groqKey || import.meta.env.VITE_GROQ_API_KEY || '';
+const useGroq   = needsIntl && !!effectiveGroqKey;
+const useOpenAI = needsIntl && !useGroq && !!openaiKey;
+// Neither truthy → fall through to Sarvam (Indian ↔ Indian only)
 ```
-If either language in the pair is international → OpenAI pipeline. Otherwise → Sarvam pipeline.
+The same pattern is repeated in three sites: `stopRecording` (solo), the remote branch, and `handlePartnerMessage`.
 
 ## Streaming STT (Sarvam WebSocket)
 
@@ -131,14 +166,17 @@ Each person has an **🇮🇳 Indian / 🌍 Intl toggle** in their language sele
 ```
 src/
   App.jsx               — Main UI + state + pipeline routing + VAD logic
-  pipeline.js           — Sarvam pipeline + OpenAI pipeline functions
+  pipeline.js           — Sarvam + OpenAI + Groq+ElevenLabs pipeline functions
   peer.js               — PeerJS helpers (generateRoomCode, hostPeerId)
   api/
     sarvam.js           — Sarvam API wrappers + AudioContext playback
     sarvam-streaming.js — WebSocket streaming STT (SarvamStreamingSTT class)
     openai.js           — OpenAI API wrappers (Whisper, GPT, TTS-1)
+    groq.js             — Groq Whisper + Llama wrappers + browserTTS fallback
+    elevenlabs.js       — ElevenLabs Turbo v2.5 TTS wrapper
   main.jsx              — React entry point
 api/
+  _cors.js                  — handlePreflight() helper for CORS OPTIONS
   speech-to-text.js         — Vercel proxy → Sarvam STT (multipart)
   translate.js              — Vercel proxy → Sarvam Mayura
   text-to-speech.js         — Vercel proxy → Sarvam Bulbul
@@ -146,11 +184,23 @@ api/
   openai-stt-translate.js   — Vercel proxy → Whisper /translations (→ English)
   openai-chat.js            — Vercel proxy → GPT-4o-mini
   openai-tts.js             — Vercel proxy → TTS-1 (returns raw mp3 binary)
+  groq-stt-translate.js     — Vercel proxy → Groq Whisper /transcriptions
+  groq-chat.js              — Vercel proxy → Groq Llama /chat/completions
+  elevenlabs-tts.js         — Vercel proxy → ElevenLabs /v1/text-to-speech/{id}
+extension/                  — Chrome MV3 extension (see §"Chrome Extension MVP")
+  manifest.json             — MV3 manifest, permissions, host access
+  background.js             — Service worker; message router + lifecycle
+  popup/                    — Toolbar popup (lang select + start/stop)
+  offscreen/                — Hidden page holding MediaStreams + MediaRecorder
+  widget/                   — Content script — floating push-to-talk overlay
+  lib/                      — Ported copies of pipeline + api wrappers (no Vite env)
+  icons/                    — 16/48/128 placeholder PNGs
 index.html              — HTML entry with fonts (Crimson Pro + DM Sans)
-vite.config.js          — Dev proxies (/sarvam → api.sarvam.ai, /openai → api.openai.com)
-vercel.json             — Region bom1 (Mumbai) + framework Vite
+vite.config.js          — Dev proxies (/sarvam, /openai, /groq, /elevenlabs)
+vercel.json             — Region bom1 (Mumbai) + framework Vite + CORS headers for /api/*
 .npmrc                  — legacy-peer-deps=true (Vite 5 vs @vitejs/plugin-basic-ssl conflict)
-.env                    — VITE_SARVAM_API_KEY + VITE_OPENAI_API_KEY (local dev, not committed)
+.env                    — VITE_SARVAM_API_KEY + VITE_GROQ_API_KEY + VITE_ELEVENLABS_API_KEY + VITE_OPENAI_API_KEY (local dev, not committed)
+BUSINESS_PLAN.md        — Strategy notes (not committed; in .gitignore)
 ```
 
 ## API Configuration
@@ -166,11 +216,53 @@ vercel.json             — Region bom1 (Mumbai) + framework Vite
 - Setup screen hidden in prod
 
 ### Vercel env vars required
+Each external API needs **two** env vars when the client decides which pipeline to use:
+- `VITE_*` — baked into the client bundle at build time → lets `App.jsx` routing pick the right pipeline
+- Plain (no prefix) — read at runtime by the serverless function → actual upstream auth
+
 ```bash
-vercel env add SARVAM_API_KEY production        # for serverless function proxies
-vercel env add VITE_SARVAM_API_KEY production   # for WebSocket streaming (public, in bundle)
-vercel env add OPENAI_API_KEY production        # for OpenAI serverless proxies
+# Sarvam
+vercel env add SARVAM_API_KEY production         # for serverless function proxies
+vercel env add VITE_SARVAM_API_KEY production    # for WebSocket streaming (public, in bundle)
+
+# Groq (preferred international pipeline)
+vercel env add GROQ_API_KEY production
+vercel env add VITE_GROQ_API_KEY production      # so client routes to Groq, not OpenAI
+
+# ElevenLabs (voice quality for international)
+vercel env add ELEVENLABS_API_KEY production
+vercel env add VITE_ELEVENLABS_API_KEY production
+
+# OpenAI (fallback — optional; removing it ensures no accidental billing)
+vercel env add OPENAI_API_KEY production
+vercel env add VITE_OPENAI_API_KEY production
 ```
+
+After any env var change, redeploy: `vercel --prod` (existing deployments don't auto-refresh env).
+
+### Key-routing state hydration (envOr + effectiveGroqKey)
+Two subtle patterns matter for selecting the right pipeline:
+
+```js
+// src/App.jsx ~line 75 — prefer .env value, fall back to localStorage only
+// when the env var is truly absent. An intentionally empty `VITE_OPENAI_API_KEY=`
+// does NOT leak stale localStorage keys.
+const envOr = (envVal, stored) => (envVal !== undefined && envVal !== '' ? envVal : stored);
+const [groqKey, setGroqKey] = useState(
+  isProd ? '' : envOr(import.meta.env.VITE_GROQ_API_KEY, storedGroqKey),
+);
+```
+
+```js
+// Inside pipeline-routing sites, fall back to the raw env var if state is
+// still empty (covers HMR/state-hydration edge cases). Also require a
+// non-empty openaiKey before OpenAI is even considered.
+const effectiveGroqKey = groqKey || import.meta.env.VITE_GROQ_API_KEY || '';
+const useGroq   = needsIntl && !!effectiveGroqKey;
+const useOpenAI = needsIntl && !useGroq && !!openaiKey;
+```
+
+A defensive `useEffect` also clears any stale `openai_key` out of localStorage whenever `groqKey` is present, so nothing can quietly leak back in across reloads.
 
 ## Audio Recording & Playback
 
@@ -281,6 +373,9 @@ Both devices **must use the same URL** (both on `https://vaak-setu.vercel.app`, 
 - [x] Two-phone remote mode via PeerJS WebRTC data channel
 - [x] Room code pairing (4-letter, host/guest flow)
 - [x] Go Live — hands-free continuous conversation mode (two-phone)
+- [x] Groq + ElevenLabs pipeline as default for international languages (OpenAI → fallback)
+- [x] CORS on all `/api/*` endpoints for extension use
+- [x] Chrome MV3 extension MVP (tabCapture + mic + push-to-talk, speakerphone routing)
 
 ## Latency Profile
 
@@ -325,8 +420,97 @@ npm run build             # production build → dist/
 `.env` file:
 ```
 VITE_SARVAM_API_KEY=sk_...
-VITE_OPENAI_API_KEY=sk-proj-...
+VITE_GROQ_API_KEY=gsk_...
+VITE_ELEVENLABS_API_KEY=sk_...
+VITE_OPENAI_API_KEY=               # leave empty to keep OpenAI out of the routing
 ```
+
+## CORS for /api/* (required by the extension)
+The Chrome extension calls `https://vaak-setu.vercel.app/api/*` from a
+`chrome-extension://…` origin, so every serverless function must handle CORS.
+
+- `vercel.json` sets the response headers globally for `/api/(.*)`:
+  `Access-Control-Allow-Origin: *`,
+  `Access-Control-Allow-Methods: POST, OPTIONS`,
+  `Access-Control-Allow-Headers: Content-Type, Authorization, api-subscription-key, xi-api-key`.
+- `api/_cors.js` exports `handlePreflight(req, res)` which short-circuits OPTIONS requests with a 204. Every `/api/*.js` starts with:
+  ```js
+  import { handlePreflight } from './_cors.js';
+  export default async function handler(req, res) {
+    if (handlePreflight(req, res)) return;
+    // ... normal logic
+  }
+  ```
+- The webapp itself doesn't need CORS (same origin as the functions), but ship the headers for extension + any future third-party integration.
+
+## Chrome Extension MVP (`extension/`)
+
+### Goal
+Agent-side deployment for call centers: a push-to-talk overlay that works on top of **any** browser-based softphone (Google Meet, Zoom Web, Teams, Genesys Cloud, Freshcaller, Talkdesk, Exotel dialer). Zero integration work for the call-center platform.
+
+### Audio routing (phase 1 — "speakerphone mode")
+- Customer side: `chrome.tabCapture` grabs tab audio → translated → played through speakers → agent hears translation.
+- Agent side: `getUserMedia` grabs mic → translated → played through speakers → customer's phone microphone picks it up.
+- Limitation: customer hears slight echo + background. Phase 2 will use a virtual audio cable (VB-Cable on Windows, BlackHole on macOS) for clean routing.
+
+### MV3 architecture — 4 contexts
+| Context | File | Role |
+|---|---|---|
+| **Toolbar popup** | `popup/popup.js` | Language selection, voice gender, Start/Stop. **Triggers mic permission prompt** (see below). |
+| **Service worker (background)** | `background.js` | Message router + lifecycle. Creates/destroys offscreen document. Gets tab `streamId` via `chrome.tabCapture.getMediaStreamId`. Forwards messages between widget and offscreen. |
+| **Offscreen document** | `offscreen/offscreen.js` | Hidden page (MV3 can't hold MediaStreams in a service worker). Does `getUserMedia({mandatory: {chromeMediaSource:'tab', chromeMediaSourceId}})` for tab audio, `getUserMedia({audio:true})` for mic, runs `MediaRecorder`, runs pipeline, plays TTS via WebAudio. |
+| **Content script (widget)** | `widget/widget.js` | Floating draggable overlay injected into the call tab. Push-to-talk buttons, transcript feed. Sends commands (`recordCustomer` / `recordAgent` / `stopRecord`) to background. |
+
+### Message protocol
+- **Popup → background:** `{type: 'start', tabId}` / `{type: 'stop'}`
+- **Widget → background:** `{type: 'recordCustomer' | 'recordAgent' | 'stopRecord' | 'requestStop'}`
+- **Background → offscreen:** `{to: 'offscreen', cmd: 'init' | 'recordCustomer' | 'recordAgent' | 'stopRecord' | 'stop', ...}`
+- **Offscreen → widget (via background):** `{to: 'widget', tabId, event: 'show' | 'hide' | 'ready' | 'status' | 'message' | 'error', ...}`
+  - Background routes `to: 'widget'` messages via `chrome.tabs.sendMessage(tabId, msg)` — content scripts don't receive `chrome.runtime.sendMessage` from other extension contexts directly.
+
+### Microphone permission in MV3 — CRITICAL
+Offscreen documents **cannot** request mic permission on their own. They have no user gesture and no UI to surface Chrome's permission prompt, so `getUserMedia({audio:true})` fails silently.
+
+**Fix pattern:** trigger the permission prompt from the popup (which has a user gesture from the toolbar click). Once granted, the entire `chrome-extension://<id>` origin is unlocked — offscreen then inherits the permission.
+
+```js
+// popup.js — inside onToggle, before sending `start` to background:
+async function ensureMicPermission() {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s.getTracks().forEach((t) => t.stop()); // we just wanted the grant
+  } catch (err) {
+    throw new Error('Microphone permission denied. Allow in site settings and retry.');
+  }
+}
+```
+
+Offscreen should still **lazy-retry** on first agent-press rather than hard-failing at init — this covers cases where init happened before the grant propagated.
+
+### Tab audio passthrough
+`tabCapture` mutes the source tab by default. To keep the call audible while we also record it, fan the captured stream back out to the speakers in the offscreen doc:
+```js
+passthroughCtx = new AudioContext();
+passthroughCtx.createMediaStreamSource(tabStream).connect(passthroughCtx.destination);
+```
+
+### Porting vs. bundling
+The extension ships its own copies of `pipeline.js` + `api/sarvam.js|groq.js|elevenlabs.js` under `extension/lib/` because:
+- The webapp versions use `import.meta.env.DEV` to switch between dev proxy and prod serverless paths — the extension has no Vite env at all.
+- `API_BASE` in `extension/lib/config.js` is hardcoded to `https://vaak-setu.vercel.app/api`. Change it there if pointing at localhost; also add the local URL to `host_permissions` in `manifest.json`.
+- No streaming STT in the extension — batch only. Good enough for MVP; revisit if latency matters on real calls.
+
+### Installing (dev, unpacked)
+1. Deploy the backend first with all Vercel env vars set (otherwise API calls 401).
+2. `chrome://extensions` → Developer mode on → Load unpacked → pick `extension/`.
+3. Pin the icon to the toolbar.
+4. Content scripts only inject into tabs opened **after** the extension loaded — if the widget doesn't appear, reload the call tab.
+
+### Explicitly out-of-scope for phase 1
+- Usage/minutes logging (paused pending login design).
+- VAD / hands-free continuous mode — push-to-talk only for now.
+- Virtual audio cable integration for clean customer-directed audio.
+- Per-agent config beyond language + voice.
 
 ## Business Context
 - Sarvam models outperform Google Translate for Indian languages — key differentiator
@@ -354,6 +538,16 @@ VITE_OPENAI_API_KEY=sk-proj-...
 - Two-phone mode laptop↔phone fix: added Google STUN servers (ICE_SERVERS) to PeerJS config
 - unlockAudio() called at conn.on('open') and startAutoConversation() to pre-warm AudioContext on receiver side
 - Both devices must use the same URL for WebRTC signaling to work (can't mix localhost + production)
+- Added Groq + ElevenLabs as cheaper international pipeline; OpenAI demoted to fallback
+- Groq: must use `whisper-large-v3` (not `-turbo` — no `/translations` endpoint); language param must be ISO-639-1
+- Groq Llama 70B required — 8B hallucinates on translation; 70B is reliable
+- Groq Llama prompt wraps input in `<translate>` XML tags so "give me tips" isn't interpreted as an instruction
+- Added `envOr` helper: prefer .env value, fall back to localStorage only when env is truly absent (not empty string) — prevents stale OpenAI keys from overriding an intentional empty `VITE_OPENAI_API_KEY=`
+- Three-way routing with `effectiveGroqKey`: falls back to `import.meta.env.VITE_GROQ_API_KEY` if state is still empty; OpenAI path now requires non-empty `openaiKey` before firing
+- Defensive `useEffect` clears stale `openai_key` from localStorage whenever `groqKey` is present
+- Added CORS to `/api/*`: `vercel.json` headers block + `api/_cors.js` `handlePreflight()` imported by every serverless function
+- Built Chrome MV3 extension (`extension/`) for call-center agent deployment — push-to-talk overlay, tabCapture + getUserMedia, speakerphone-mode audio routing
+- Extension mic permission fix: popup triggers `getUserMedia({audio:true})` before sending `start` — offscreen docs inherit the grant. Lazy retry on first agent press for resilience.
 
 ## Commands
 ```bash
