@@ -34,7 +34,12 @@ async function translateOne({ text, sourceLang, targetLang }) {
       source_language_code: toNonSTTCode(sourceLang),
       target_language_code: toNonSTTCode(targetLang),
       model: 'mayura:v1',
-      mode: 'modern-colloquial',
+      // 'formal' translates everything to the target language — what a
+      // call-center customer who only speaks the target lang actually needs.
+      // 'modern-colloquial' preserves common English words ("new plan buy
+      // please help") which reads as Hinglish; unusable when the listener
+      // doesn't speak English at all.
+      mode: 'formal',
     }),
   });
   if (!res.ok) throw new Error(`Sarvam translate failed (${res.status}): ${await res.text().catch(() => res.statusText)}`);

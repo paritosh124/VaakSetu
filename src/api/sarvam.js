@@ -66,7 +66,12 @@ async function translateOne({ text, sourceLang, targetLang, apiKey }) {
       source_language_code: toNonSTTCode(sourceLang),
       target_language_code: toNonSTTCode(targetLang),
       model: 'mayura:v1',
-      mode: 'modern-colloquial', // natural conversational translation
+      // 'formal' translates everything into the target language.
+      // 'modern-colloquial' preserves common English words ("new plan buy
+      // please help") by design, which reads as Hinglish — unusable when the
+      // listener doesn't speak English at all. Call-center + cross-cultural
+      // conversations need a true translation, not a code-mix.
+      mode: 'formal',
     }),
   });
 

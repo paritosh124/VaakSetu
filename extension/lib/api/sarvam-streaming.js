@@ -59,14 +59,31 @@ export class SarvamStreamingSTT {
     if (!apiKey) throw new Error('No Sarvam key available for streaming');
 
     const url = `${WS_URL}?api-subscription-key=${apiKey}`;
+    console.log('[vaaksetu streaming] opening WS; key prefix:', (apiKey || '').slice(0, 6), 'len:', (apiKey || '').length);
     const ws = new WebSocket(url);
     this._ws = ws;
     ws.binaryType = 'arraybuffer';
 
     await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('WebSocket connection timed out')), 6000);
-      ws.onopen = () => { clearTimeout(t); resolve(); };
-      ws.onerror = () => { clearTimeout(t); reject(new Error('WebSocket connection failed')); };
+      const t = setTimeout(() => reject(new Error('WebSocket connection timed out after 6s')), 6000);
+      ws.onopen = () => {
+        clearTimeout(t);
+        console.log('[vaaksetu streaming] WS open');
+        resolve();
+      };
+      ws.onerror = (ev) => {
+        clearTimeout(t);
+        console.error('[vaaksetu streaming] WS error event', ev);
+        reject(new Error('WebSocket handshake failed — check Network tab for the 101/4xx status'));
+      };
+      ws.onclose = (ev) => {
+        // Only reject if we never opened (close fires without open).
+        if (ws.readyState !== WebSocket.OPEN && !this._stopped) {
+          clearTimeout(t);
+          console.error(`[vaaksetu streaming] WS closed before open code=${ev.code} reason=${ev.reason || '(none)'}`);
+          reject(new Error(`WebSocket closed before open: code=${ev.code} reason="${ev.reason || ''}"`));
+        }
+      };
     });
 
     const sttCode = this.languageCode === 'od-IN' ? 'or-IN' : this.languageCode;

@@ -30,7 +30,9 @@
     "scripting"
   ],
   "host_permissions": [
-    "https://vaak-setu.vercel.app/*"
+    "https://vaak-setu.vercel.app/*",
+    "https://api.sarvam.ai/*",
+    "wss://api.sarvam.ai/*"
   ],
   "content_scripts": [
     {
