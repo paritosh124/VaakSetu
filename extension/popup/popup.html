@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>VaakSetu</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1>VaakSetu</h1>
+    <p class="subtitle">Agent Translator</p>
+  </header>
+
+  <section class="row">
+    <label>Agent speaks</label>
+    <select id="agentLang"></select>
+    <div class="voice-row">
+      <label class="voice-label">Agent voice</label>
+      <select id="agentVoice">
+        <option value="male">Male</option>
+        <option value="female">Female</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="row">
+    <label>Customer speaks</label>
+    <select id="customerLang"></select>
+    <div class="voice-row">
+      <label class="voice-label">Customer voice</label>
+      <select id="customerVoice">
+        <option value="female">Female</option>
+        <option value="male">Male</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="action">
+    <button id="toggleBtn" class="primary">Start translator</button>
+    <p id="statusLine" class="status"></p>
+  </section>
+
+  <footer>
+    <p class="hint">
+      After starting, open the call tab and use the floating widget.
+      Press-and-hold <b>Customer</b> or <b>Agent</b> while they speak.
+    </p>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

@@ -1,5 +1,8 @@
 // ElevenLabs TTS proxy — returns raw mp3 binary
+import { handlePreflight } from './_cors.js';
+
 export default async function handler(req, res) {
+  if (handlePreflight(req, res)) return;
   // voice_id is passed as the last path segment: /api/elevenlabs-tts/VOICE_ID
   const voiceId = req.query.voiceId || req.url.split('/').pop();
 

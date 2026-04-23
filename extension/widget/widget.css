@@ -1,0 +1,95 @@
+/* Scope every rule to #vaaksetu-widget so we don't leak styles into the host page. */
+#vaaksetu-widget {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 320px;
+  max-height: 60vh;
+  z-index: 2147483646; /* stay on top of overlays */
+  background: #0C0B1A;
+  color: #EDE9F5;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(0,0,0,.45);
+  border: 1px solid #2a2750;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+#vaaksetu-widget.vs-open { display: flex; }
+
+#vaaksetu-widget .vs-head {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  background: #151329;
+  cursor: move;
+  gap: 8px;
+}
+#vaaksetu-widget .vs-title { flex: 1; font-weight: 600; color: #F5A623; font-size: 13px; }
+#vaaksetu-widget .vs-close {
+  background: transparent;
+  border: none;
+  color: #8E8AA0;
+  cursor: pointer;
+  font-size: 18px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+#vaaksetu-widget .vs-status {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #0FB8A9;
+  min-height: 14px;
+  border-bottom: 1px solid #2a2750;
+  background: #0F0E1F;
+}
+#vaaksetu-widget .vs-status.vs-error { color: #E5484D; }
+
+#vaaksetu-widget .vs-feed {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  max-height: 280px;
+  min-height: 60px;
+}
+#vaaksetu-widget .vs-msg {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  background: #151329;
+  border-radius: 8px;
+  border-left: 3px solid #F5A623;
+  font-size: 12px;
+  line-height: 1.4;
+}
+#vaaksetu-widget .vs-msg.vs-customer { border-left-color: #0FB8A9; }
+#vaaksetu-widget .vs-msg .vs-label { font-size: 10px; color: #8E8AA0; margin-bottom: 2px; }
+#vaaksetu-widget .vs-msg .vs-pivot { color: #8E8AA0; font-style: italic; font-size: 11px; margin-top: 4px; }
+
+#vaaksetu-widget .vs-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #0F0E1F;
+  border-top: 1px solid #2a2750;
+}
+#vaaksetu-widget .vs-btn {
+  padding: 12px 6px;
+  border: none;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #0C0B1A;
+  transition: transform .06s ease, opacity .1s ease;
+  touch-action: none;
+}
+#vaaksetu-widget .vs-btn.vs-customer { background: #0FB8A9; color: #fff; }
+#vaaksetu-widget .vs-btn.vs-agent    { background: #F5A623; }
+#vaaksetu-widget .vs-btn:active,
+#vaaksetu-widget .vs-btn.vs-recording { transform: scale(.97); opacity: .85; }
+#vaaksetu-widget .vs-btn small { display: block; opacity: .75; font-weight: 400; margin-top: 2px; font-size: 10px; }

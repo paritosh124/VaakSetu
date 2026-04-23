@@ -1,7 +1,10 @@
 // Whisper translation proxy — speech in any language → English text
+import { handlePreflight } from './_cors.js';
+
 export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
+  if (handlePreflight(req, res)) return;
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const body = Buffer.concat(chunks);
