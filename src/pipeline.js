@@ -12,47 +12,6 @@ import { openaiSpeechToEnglish, openaiSpeechToText, openaiTranslate, openaiTTS }
 import { groqSpeechToEnglish, groqTranslate, browserTTS } from './api/groq.js';
 import { elevenLabsTTS } from './api/elevenlabs.js';
 
-// Indian languages that Sarvam Bulbul / Mayura natively support.
-// Duplicated from App.jsx to keep pipeline.js self-contained.
-const INDIAN_TTS_CODES = new Set([
-  'hi-IN','en-IN','bn-IN','gu-IN','kn-IN','ml-IN','mr-IN','or-IN','pa-IN','ta-IN','te-IN',
-]);
-const isIndianTarget = (code) => INDIAN_TTS_CODES.has(code);
-const SARVAM_VOICE = { male: 'anand', female: 'ritu' };
-
-// Pipeline result's `audioB64` is always an array of base64 strings (one per
-// Bulbul chunk; length 1 for OpenAI/ElevenLabs). Play them back-to-back.
-async function playAll(audios) {
-  for (const b64 of audios || []) {
-    if (b64) await playBase64Audio(b64);
-  }
-}
-
-/**
- * Sentence-streaming helper — translate + TTS one sentence, return base64
- * audio clips without playing. The caller owns playback scheduling so that
- * multiple in-flight sentences can translate in parallel while audio plays
- * sequentially.
- */
-export async function pivotToAudio({ pivotText, targetLang, voice, voiceGender, apiKey, onStep, onText }) {
-  const isTargetEnglish = targetLang === 'en-IN';
-  const tgtIndian = isIndianTarget(targetLang);
-  let translatedText = pivotText;
-
-  if (!isTargetEnglish && tgtIndian) {
-    onStep?.('translate', `Translating to ${targetLang.split('-')[0].toUpperCase()}…`);
-    translatedText = await translateText({ text: pivotText, sourceLang: 'en-IN', targetLang, apiKey });
-  }
-  onText?.(pivotText, translatedText);
-
-  onStep?.('tts', 'Generating voice…');
-  const speaker = voice || SARVAM_VOICE[voiceGender || 'male'] || 'anand';
-  const audioB64 = tgtIndian
-    ? await textToSpeech({ text: translatedText, languageCode: targetLang, speaker, apiKey })
-    : [await elevenLabsTTS({ text: translatedText, voiceGender: voiceGender || 'male', apiKey: import.meta.env.VITE_ELEVENLABS_API_KEY || '' })];
-  return { pivotText, translatedText, audioB64 };
-}
-
 /**
  * Sender half — used in remote (two-phone) mode.
  * Speech → English pivot text only. Result is sent to partner over WebRTC.
@@ -84,7 +43,7 @@ export async function englishToSpeech({ pivotText, targetLang, voice, apiKey, on
   const audioB64 = await textToSpeech({ text: translatedText, languageCode: targetLang, speaker: voice || 'anand', apiKey });
 
   onStep?.('playing', 'Playing…');
-  const audioPromise = playAll(audioB64).then(() => onStep?.('done', ''));
+  const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
 
   return { pivotText, translatedText, audioB64, audioPromise };
 }
@@ -144,7 +103,7 @@ export async function runTranslatePipeline({ audioBlob, sourceLang, targetLang, 
 
   // ── Step 4: Play (don't await — let caller handle in background) ─────────
   onStep('playing', 'Playing…');
-  const audioPromise = playAll(audioB64).then(() => onStep('done', ''));
+  const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
 
   return {
     pivotText,
@@ -191,10 +150,10 @@ export async function runOpenAIPipeline({
   // Step 3: TTS-1
   onStep('tts', 'Generating voice…');
   const voice = voiceGender === 'female' ? 'nova' : 'onyx';
-  const audioB64 = [await openaiTTS({ text: translatedText, voice, apiKey: openaiKey })];
+  const audioB64 = await openaiTTS({ text: translatedText, voice, apiKey: openaiKey });
 
   onStep('playing', 'Playing…');
-  const audioPromise = playAll(audioB64).then(() => onStep('done', ''));
+  const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
 
   return { pivotText, translatedText, audioB64, audioPromise };
 }
@@ -232,10 +191,10 @@ export async function openaiEnglishToSpeech({
 
   onStep?.('tts', 'Generating voice…');
   const voice = voiceGender === 'female' ? 'nova' : 'onyx';
-  const audioB64 = [await openaiTTS({ text: translatedText, voice, apiKey: openaiKey })];
+  const audioB64 = await openaiTTS({ text: translatedText, voice, apiKey: openaiKey });
 
   onStep?.('playing', 'Playing…');
-  const audioPromise = playAll(audioB64).then(() => onStep?.('done', ''));
+  const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
 
   return { pivotText, translatedText, audioB64, audioPromise };
 }
@@ -254,71 +213,38 @@ export async function runGroqPipeline({
   voiceGender,
   groqKey,
   elevenLabsKey,
-  sarvamKey,
   onStep,
   onText,
 }) {
   const isTargetEnglish = targetLang === 'en-IN' || targetLang === 'en';
-  const tgtIndian = isIndianTarget(targetLang);
-  const srcIndian = isIndianTarget(sourceLang);
 
-  // Step 1: Speech → English pivot. Saaras for Indian source (better Indic STT),
-  // Groq Whisper otherwise. Saaras "translate" mode outputs English directly.
-  let pivotText;
-  if (srcIndian) {
-    const isSrcEnglish = sourceLang === 'en-IN';
-    onStep('stt', isSrcEnglish ? 'Transcribing…' : 'Recognising & converting to English…');
-    const sttResult = await speechToText({
-      audioBlob,
-      languageCode: sourceLang,
-      mode: isSrcEnglish ? 'transcribe' : 'translate',
-      apiKey: sarvamKey,
-    });
-    pivotText = sttResult.transcript;
-  } else {
-    onStep('stt', 'Transcribing speech…');
-    pivotText = await groqSpeechToEnglish({ audioBlob, apiKey: groqKey, sourceLang });
-  }
+  onStep('stt', 'Transcribing speech…');
+  const pivotText = await groqSpeechToEnglish({ audioBlob, apiKey: groqKey, sourceLang });
 
-  // Step 2: Translate. Mayura for Indian targets (better Indic quality), Llama for intl.
   let translatedText = pivotText;
   if (!isTargetEnglish) {
     onStep('translate', `Translating to ${targetLangName}…`);
-    translatedText = tgtIndian
-      ? await translateText({ text: pivotText, sourceLang: 'en-IN', targetLang, apiKey: sarvamKey })
-      : await groqTranslate({ text: pivotText, targetLangName, apiKey: groqKey });
+    translatedText = await groqTranslate({ text: pivotText, targetLangName, apiKey: groqKey });
   }
 
   onText?.(pivotText, translatedText);
 
-  // Step 3: TTS. Bulbul for Indian targets (native Indic voice), ElevenLabs otherwise.
   onStep('tts', 'Generating voice…');
 
-  if (tgtIndian) {
-    const audioB64 = await textToSpeech({
-      text: translatedText,
-      languageCode: targetLang,
-      speaker: SARVAM_VOICE[voiceGender] || 'anand',
-      apiKey: sarvamKey,
-    });
-    onStep('playing', 'Playing…');
-    const audioPromise = playAll(audioB64).then(() => onStep('done', ''));
-    return { pivotText, translatedText, audioB64, audioPromise };
-  }
-
   if (elevenLabsKey) {
-    const audioB64 = [await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey })];
+    // ElevenLabs — best quality, returns audio for replay
+    const audioB64 = await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey });
     onStep('playing', 'Playing…');
-    const audioPromise = playAll(audioB64).then(() => onStep('done', ''));
+    const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
     return { pivotText, translatedText, audioB64, audioPromise };
+  } else {
+    // Browser TTS — free, no replay (doesn't return audio data)
+    onStep('playing', 'Playing…');
+    const audioPromise = browserTTS({ text: translatedText, languageCode: targetLang, voiceGender })
+      .then(() => onStep('done', ''))
+      .catch(() => onStep('done', ''));
+    return { pivotText, translatedText, audioB64: null, audioPromise };
   }
-
-  // No ElevenLabs and target isn't Indian — fall back to browser speechSynthesis.
-  onStep('playing', 'Playing…');
-  const audioPromise = browserTTS({ text: translatedText, languageCode: targetLang, voiceGender })
-    .then(() => onStep('done', ''))
-    .catch(() => onStep('done', ''));
-  return { pivotText, translatedText, audioB64: null, audioPromise };
 }
 
 /**
@@ -339,47 +265,31 @@ export async function groqEnglishToSpeech({
   voiceGender,
   groqKey,
   elevenLabsKey,
-  sarvamKey,
   onStep,
   onText,
 }) {
   const isTargetEnglish = targetLang === 'en-IN' || targetLang === 'en';
-  const tgtIndian = isIndianTarget(targetLang);
-
   let translatedText = pivotText;
+
   if (!isTargetEnglish) {
     onStep?.('translate', `Translating to ${targetLangName}…`);
-    translatedText = tgtIndian
-      ? await translateText({ text: pivotText, sourceLang: 'en-IN', targetLang, apiKey: sarvamKey })
-      : await groqTranslate({ text: pivotText, targetLangName, apiKey: groqKey });
+    translatedText = await groqTranslate({ text: pivotText, targetLangName, apiKey: groqKey });
   }
 
   onText?.(pivotText, translatedText);
 
   onStep?.('tts', 'Generating voice…');
 
-  if (tgtIndian) {
-    const audioB64 = await textToSpeech({
-      text: translatedText,
-      languageCode: targetLang,
-      speaker: SARVAM_VOICE[voiceGender] || 'anand',
-      apiKey: sarvamKey,
-    });
-    onStep?.('playing', 'Playing…');
-    const audioPromise = playAll(audioB64).then(() => onStep?.('done', ''));
-    return { pivotText, translatedText, audioB64, audioPromise };
-  }
-
   if (elevenLabsKey) {
-    const audioB64 = [await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey })];
+    const audioB64 = await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey });
     onStep?.('playing', 'Playing…');
-    const audioPromise = playAll(audioB64).then(() => onStep?.('done', ''));
+    const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
     return { pivotText, translatedText, audioB64, audioPromise };
+  } else {
+    onStep?.('playing', 'Playing…');
+    const audioPromise = browserTTS({ text: translatedText, languageCode: targetLang, voiceGender })
+      .then(() => onStep?.('done', ''))
+      .catch(() => onStep?.('done', ''));
+    return { pivotText, translatedText, audioB64: null, audioPromise };
   }
-
-  onStep?.('playing', 'Playing…');
-  const audioPromise = browserTTS({ text: translatedText, languageCode: targetLang, voiceGender })
-    .then(() => onStep?.('done', ''))
-    .catch(() => onStep?.('done', ''));
-  return { pivotText, translatedText, audioB64: null, audioPromise };
 }

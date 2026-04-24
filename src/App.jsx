@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { runTranslatePipeline, speechToEnglish, englishToSpeech, runOpenAIPipeline, openaiSpeechToEnglishPipeline, openaiEnglishToSpeech, runGroqPipeline, groqSpeechToEnglishPipeline, groqEnglishToSpeech, pivotToAudio } from './pipeline.js';
-import { speechToText, translateText, textToSpeech, playBase64Audio, unlockAudio } from './api/sarvam.js';
+import { runTranslatePipeline, speechToEnglish, englishToSpeech, runOpenAIPipeline, openaiSpeechToEnglishPipeline, openaiEnglishToSpeech, runGroqPipeline, groqSpeechToEnglishPipeline, groqEnglishToSpeech } from './pipeline.js';
+import { playBase64Audio, unlockAudio } from './api/sarvam.js';
 import { SarvamStreamingSTT, supportsStreamingSTT } from './api/sarvam-streaming.js';
 import { Peer } from 'peerjs';
 import { generateRoomCode, hostPeerId } from './peer.js';
@@ -116,10 +116,6 @@ export default function App() {
 
   const [partialTranscript, setPartialTranscript] = useState('');
   const [autoConversation, setAutoConversation] = useState(false);
-  const [soloLive, setSoloLive] = useState(false);
-  const soloLiveRef = useRef(false);
-  const soloLiveCtxRef = useRef(null); // { stream, recorder, chunks, analyser, vadInterval }
-  const soloLivePlayChainRef = useRef(Promise.resolve());
   const peerRef = useRef(null);
   const connRef = useRef(null);
   const partnerHandlerRef = useRef(null);
@@ -230,182 +226,6 @@ export default function App() {
     // stopRecording will no-op if not currently recording
     stopRecordingRef.current?.('a');
   }, [clearSilenceDetector]);
-
-  // ── Solo Go Live (auto-detect) ─────────────────────────────────────────────
-  // Two people on one device. Continuous mic capture + VAD. Each utterance
-  // goes through batch STT with auto-detect (language_code='unknown'). The
-  // detected language routes the turn to the OTHER configured language.
-  // Script heuristic handles the common en-IN ↔ hi-IN pair since Saaras
-  // returns the normalised language code.
-  const stopSoloLive = useCallback(() => {
-    soloLiveRef.current = false;
-    setSoloLive(false);
-    const ctx = soloLiveCtxRef.current;
-    if (ctx) {
-      try { clearInterval(ctx.vadInterval); } catch {}
-      try { ctx.analyserCtx?.close?.(); } catch {}
-      try { ctx.recorder?.state !== 'inactive' && ctx.recorder.stop(); } catch {}
-      try { ctx.stream?.getTracks().forEach((t) => t.stop()); } catch {}
-    }
-    soloLiveCtxRef.current = null;
-  }, []);
-
-  const processSoloUtterance = useCallback(async (audioBlob) => {
-    if (!soloLiveRef.current) return;
-    // Batch STT with auto-detect: Sarvam returns the normalised source lang.
-    let sttResult;
-    try {
-      sttResult = await speechToText({
-        audioBlob,
-        languageCode: 'unknown',
-        mode: 'transcribe',
-        apiKey: streamKey || apiKey,
-      });
-    } catch (err) {
-      console.warn('[solo-live] STT failed', err?.message);
-      return;
-    }
-    const detected = (sttResult.detectedLanguage || '').trim();
-    const sourceText = (sttResult.transcript || '').trim();
-    if (!sourceText) return;
-
-    // Route: if detected matches langA → speak to langB and vice versa.
-    // Fall back to script heuristic for Devanagari / Latin so en-IN ↔ hi-IN
-    // still works when Sarvam returns a slightly different code variant.
-    const normalize = (c) => (c || '').toLowerCase().split('-')[0];
-    const na = normalize(langA);
-    const nb = normalize(langB);
-    const nd = normalize(detected);
-    let speaker = 'a';
-    if (nd && nd === nb) speaker = 'b';
-    else if (nd && nd === na) speaker = 'a';
-    else if (/[ऀ-ॿ]/.test(sourceText)) speaker = na === 'hi' ? 'a' : nb === 'hi' ? 'b' : 'a';
-    else if (/^[\x00-\x7F\s\p{P}]+$/u.test(sourceText)) speaker = na === 'en' ? 'a' : nb === 'en' ? 'b' : 'a';
-
-    const sourceLang = speaker === 'a' ? langA : langB;
-    const targetLang = speaker === 'a' ? langB : langA;
-    const listenerVoice = speaker === 'a' ? voiceB : voiceA;
-    const srcLang = getLang(sourceLang);
-    const tgtLang = getLang(targetLang);
-    const messageId = Date.now();
-
-    try {
-      // If source isn't English, translate to English pivot first via Saaras
-      // (we used transcribe mode so we have the source-language text).
-      let pivot = sourceText;
-      if (sourceLang !== 'en-IN') {
-        pivot = await translateText({ text: sourceText, sourceLang, targetLang: 'en-IN', apiKey: streamKey || apiKey });
-      }
-
-      const { audioB64, translatedText } = await pivotToAudio({
-        pivotText: pivot,
-        targetLang,
-        voice: VOICES[listenerVoice],
-        voiceGender: listenerVoice,
-        apiKey: streamKey || apiKey,
-      });
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: messageId,
-          speaker,
-          sourceLabel: `${srcLang.native} (${srcLang.name})`,
-          targetLabel: `${tgtLang.native} (${tgtLang.name})`,
-          pivotText: sourceText,
-          translatedText,
-          sourceLang, targetLang,
-        },
-      ]);
-
-      // Chain playback to stay in order if multiple utterances stack up.
-      soloLivePlayChainRef.current = soloLivePlayChainRef.current.then(async () => {
-        for (const b64 of audioB64 || []) if (b64) await playBase64Audio(b64);
-      });
-      await soloLivePlayChainRef.current;
-    } catch (err) {
-      console.warn('[solo-live] pipeline failed', err?.message);
-    }
-  }, [apiKey, streamKey, langA, langB, voiceA, voiceB]);
-
-  const startSoloLive = useCallback(async () => {
-    if (soloLiveRef.current) return;
-    setError('');
-    try { unlockAudio(); } catch {}
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (err) {
-      setError(err.name === 'NotAllowedError'
-        ? 'Microphone permission denied. Click the mic icon in the address bar to allow.'
-        : `Could not access microphone: ${err.message}`);
-      return;
-    }
-    soloLiveRef.current = true;
-    setSoloLive(true);
-
-    const mime = ['audio/mp4', 'audio/webm', ''].find((t) => t === '' || MediaRecorder.isTypeSupported(t));
-    let recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
-    const chunks = [];
-    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-    recorder.start(100);
-
-    // VAD on the same stream.
-    const analyserCtx = new AudioContext();
-    const analyser = analyserCtx.createAnalyser();
-    analyser.fftSize = 512;
-    analyserCtx.createMediaStreamSource(stream).connect(analyser);
-    const buf = new Uint8Array(analyser.fftSize);
-    const SILENCE_THRESHOLD = 10;
-    const SILENCE_MS = 900;
-    const MIN_SPEECH_MS = 400;
-    const TICK = 100;
-    let speechMs = 0;
-    let silenceMs = 0;
-    let capturing = false;
-
-    const restartRecorder = () => {
-      chunks.length = 0;
-      try {
-        recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
-        recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-        recorder.start(100);
-        soloLiveCtxRef.current.recorder = recorder;
-      } catch (e) { console.warn('[solo-live] restart recorder failed', e); }
-    };
-
-    const vadInterval = setInterval(() => {
-      if (!soloLiveRef.current) return;
-      analyser.getByteTimeDomainData(buf);
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) { const v = buf[i] - 128; sum += v * v; }
-      const rms = Math.sqrt(sum / buf.length);
-
-      if (rms >= SILENCE_THRESHOLD) {
-        if (!capturing) capturing = true;
-        speechMs += TICK;
-        silenceMs = 0;
-      } else if (capturing) {
-        silenceMs += TICK;
-        if (speechMs >= MIN_SPEECH_MS && silenceMs >= SILENCE_MS) {
-          // Utterance ended — stop recorder, process, restart.
-          capturing = false;
-          speechMs = 0;
-          silenceMs = 0;
-          const r = soloLiveCtxRef.current?.recorder;
-          const type = (r?.mimeType || 'audio/webm').split(';')[0];
-          r.onstop = () => {
-            const blob = new Blob(chunks, { type });
-            if (blob.size > 1000) processSoloUtterance(blob);
-            if (soloLiveRef.current) restartRecorder();
-          };
-          try { r.stop(); } catch {}
-        }
-      }
-    }, TICK);
-
-    soloLiveCtxRef.current = { stream, recorder, chunks, analyser, analyserCtx, vadInterval };
-  }, [processSoloUtterance]);
 
   const startRecording = useCallback((speaker) => {
     if (processing || recording) return;
@@ -522,7 +342,6 @@ export default function App() {
             voiceGender: voiceA,
             groqKey: effectiveGroqKeyP,
             elevenLabsKey: effectiveELKeyP,
-            sarvamKey: apiKey,
             onStep,
             onText,
           })
@@ -796,7 +615,6 @@ export default function App() {
           voiceGender: listenerVoice,
           groqKey: effectiveGroqKey,
           elevenLabsKey: elevenLabsKey || import.meta.env.VITE_ELEVENLABS_API_KEY || '',
-          sarvamKey: apiKey,
           onStep,
           onText,
         });
@@ -1025,46 +843,29 @@ export default function App() {
               )}
             </div>
           )
-        ) : soloLive ? (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: '20px 12px' }}>
-            <div style={{ fontSize: 14, color: '#EDE9F5', opacity: 0.85 }}>🎙 Go Live — both speakers, auto-detect</div>
-            <div style={{ fontSize: 12, color: '#8E8AA0' }}>Just speak — VaakSetu routes by detected language.</div>
-            <button style={{ ...s.goLiveBtn, background: '#E5484D' }} onClick={stopSoloLive}>
-              Leave Go Live
-            </button>
-          </div>
         ) : (
           <>
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div style={{ display: 'flex', gap: 10, flex: 1 }}>
-                <SpeakerButton
-                  label={getLang(langA).native}
-                  sub={getLang(langA).name}
-                  color={COLORS.amber}
-                  isRecording={recording === 'a'}
-                  disabled={processing || recording === 'b'}
-                  onStart={() => startRecording('a')}
-                  onStop={() => stopRecording('a')}
-                />
-                <div style={s.divider} />
-                <SpeakerButton
-                  label={getLang(langB).native}
-                  sub={getLang(langB).name}
-                  color={COLORS.teal}
-                  isRecording={recording === 'b'}
-                  disabled={processing || recording === 'a'}
-                  onStart={() => startRecording('b')}
-                  onStop={() => stopRecording('b')}
-                />
-              </div>
-              <button
-                style={s.goLiveBtn}
-                onClick={startSoloLive}
-                disabled={processing || !!recording}
-              >
-                🎙 Go Live — hands-free (auto-detect)
-              </button>
-            </div>
+            <SpeakerButton
+              label={getLang(langA).native}
+              sub={getLang(langA).name}
+              color={COLORS.amber}
+              isRecording={recording === 'a'}
+              disabled={processing || recording === 'b'}
+              onStart={() => startRecording('a')}
+              onStop={() => stopRecording('a')}
+            />
+
+            <div style={s.divider} />
+
+            <SpeakerButton
+              label={getLang(langB).native}
+              sub={getLang(langB).name}
+              color={COLORS.teal}
+              isRecording={recording === 'b'}
+              disabled={processing || recording === 'a'}
+              onStart={() => startRecording('b')}
+              onStop={() => stopRecording('b')}
+            />
           </>
         )}
       </div>
@@ -1186,10 +987,7 @@ function MessageBubble({ msg }) {
   const handleReplay = async () => {
     if (!msg.audioB64 || replaying) return;
     setReplaying(true);
-    try {
-      const chunks = Array.isArray(msg.audioB64) ? msg.audioB64 : [msg.audioB64];
-      for (const b64 of chunks) if (b64) await playBase64Audio(b64);
-    } finally { setReplaying(false); }
+    try { await playBase64Audio(msg.audioB64); } finally { setReplaying(false); }
   };
 
   return (
