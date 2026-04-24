@@ -10,9 +10,10 @@
 //   • Route TTS playback to a user-selected sinkId (VB-Cable etc.).
 // The Meet tab itself is muted by background.js (chrome.tabs.update) so the
 // agent hears only translated audio, never the raw customer voice.
-import { translateAudio, pivotToSpeech } from '../lib/pipeline.js';
+import { translateAudio, pivotToSpeech, pivotToAudio, playBase64Audio } from '../lib/pipeline.js';
 import { getLang, isIndianLang } from '../lib/config.js';
-import { SarvamStreamingSTT, supportsStreamingSTT } from '../lib/api/sarvam-streaming.js';
+import { supportsStreamingSTT } from '../lib/api/sarvam-streaming.js';
+import { SarvamSentenceStreamer } from '../lib/api/sarvam-sentence-streamer.js';
 
 let config = null;
 let tabStream = null;
@@ -406,8 +407,20 @@ async function beginCapture(who) {
   if (activeCapture) return; // one streamer at a time — ignore the late starter
   const stream = who === 'customer' ? tabStream : micStream;
   const sourceLang = who === 'customer' ? config.customerLang : config.agentLang;
+  const targetLang = who === 'customer' ? config.agentLang    : config.customerLang;
+  const voiceGender = who === 'agent' ? config.agentVoice : config.customerVoice;
+  const srcLabel = `${getLang(sourceLang).native} (${who === 'customer' ? 'Customer' : 'Agent'})`;
+  const tgtLabel = `${getLang(targetLang).native} (${who === 'customer' ? 'Agent' : 'Customer'})`;
 
-  const cap = { who, sourceLang, streamer: null, mediaRecorder: null, parts: [], blobPromise: null, blobResolve: null };
+  const cap = {
+    who, sourceLang, targetLang, voiceGender, srcLabel, tgtLabel,
+    streamer: null, mediaRecorder: null, parts: [],
+    blobPromise: null, blobResolve: null,
+    playChain: Promise.resolve(),
+    startedAt: Date.now(),
+    firstAudioAt: 0,
+    sentenceIndex: 0,
+  };
   activeCapture = cap;
   post('status', { text: `● Listening (${who})…` });
 
@@ -427,13 +440,16 @@ async function beginCapture(who) {
     post('error', { error: `Recorder failed: ${err.message}` });
   }
 
-  // Streaming STT only supports Sarvam's Indian language set.
+  // Streaming STT only supports Sarvam's Indian language set. When available,
+  // we fire translate+TTS PER SENTENCE so the listener hears the first
+  // translated sentence while the speaker is still producing the next.
   if (isIndianLang(sourceLang)) {
     const mode = sourceLang === 'en-IN' ? 'transcribe' : 'translate';
-    cap.streamer = new SarvamStreamingSTT({
+    cap.streamer = new SarvamSentenceStreamer({
       languageCode: sourceLang,
       mode,
       onPartial: (text) => post('partial', { who, text }),
+      onSentence: (sentence, isFinal) => handleSentence(cap, sentence, isFinal),
     });
     try {
       await cap.streamer.start(stream);
@@ -444,6 +460,49 @@ async function beginCapture(who) {
   }
 }
 
+// Fires a sentence through translate+TTS immediately; playback is chained to
+// preserve order across sentences within the same turn. Translation and TTS
+// for sentence N run in parallel with the playback of sentence N-1.
+function handleSentence(cap, sentence, isFinal) {
+  const idx = cap.sentenceIndex++;
+  const tStart = Date.now();
+  console.log(`[vaaksetu sentence ${cap.who} #${idx}] "${sentence}" isFinal=${isFinal}`);
+  post('status', { text: `● Translating (${cap.who})…` });
+
+  // Kick off translate + TTS immediately (non-blocking).
+  const audioPromise = pivotToAudio({
+    pivotText: sentence,
+    targetLang: cap.targetLang,
+    voiceGender: cap.voiceGender,
+    onText: (pivot, translated) => {
+      console.log(`[vaaksetu text ${cap.who} #${idx}] pivot: ${JSON.stringify(pivot)} → ${JSON.stringify(translated)}`);
+      post('message', {
+        id: Date.now() + idx,
+        who: cap.who,
+        srcLabel: cap.srcLabel,
+        tgtLabel: cap.tgtLabel,
+        pivotText: pivot,
+        translatedText: translated,
+      });
+    },
+  }).catch((err) => {
+    post('error', { error: err.message || String(err) });
+    return { audios: [] };
+  });
+
+  // Chain playback so sentences play in order even if TTS finishes out of order.
+  cap.playChain = cap.playChain.then(async () => {
+    const { audios = [] } = await audioPromise;
+    if (!cap.firstAudioAt) {
+      cap.firstAudioAt = Date.now();
+      console.log(`[vaaksetu sentence ${cap.who} #${idx}] first audio at +${cap.firstAudioAt - tStart}ms after sentence detected`);
+    }
+    for (const b64 of audios) {
+      if (b64) await playBase64Audio(b64, { sinkId: sinkFor(cap.who) });
+    }
+  }).catch((err) => console.error('[vaaksetu playChain]', err));
+}
+
 async function endCapture(who) {
   const cap = activeCapture;
   if (!cap || cap.who !== who || !goLive) {
@@ -452,23 +511,49 @@ async function endCapture(who) {
   }
   activeCapture = null;
 
-  // Capture the speech-end timestamp BEFORE awaiting the streamer stop so
-  // the per-turn timing logs include any STT-finalisation latency.
   const endedAt = Date.now();
 
-  let pivotText = '';
-  const tStreamStop = Date.now();
-  try { if (cap.streamer) pivotText = await cap.streamer.stop(); } catch {}
-  console.log(`[vaaksetu timing ${who}] streamer.stop() took ${Date.now() - tStreamStop}ms`);
+  // For the streaming path, stopping the streamer emits the final unsettled
+  // sentence via handleSentence. We don't need to feed the whole pivot into
+  // the batch pipeline again.
+  let streamedOk = false;
+  if (cap.streamer) {
+    const tStop = Date.now();
+    try {
+      await cap.streamer.stop();
+      streamedOk = true;
+    } catch (e) { console.warn('[offscreen] streamer.stop failed', e?.message); }
+    console.log(`[vaaksetu timing ${who}] streamer.stop() took ${Date.now() - tStop}ms`);
+  }
 
+  // Stop the MediaRecorder either way (we may still need its blob as fallback
+  // when streaming produced zero sentences).
   let blob = null;
   try {
     if (cap.mediaRecorder && cap.mediaRecorder.state !== 'inactive') cap.mediaRecorder.stop();
     blob = await cap.blobPromise;
   } catch {}
 
-  turnQueue.push({ who, pivotText, blob, endedAt });
   post('partial', { text: '', clear: true });
+
+  if (streamedOk && cap.sentenceIndex > 0) {
+    // Sentences were fired incrementally — wait for their playback to drain,
+    // then free the queue for the next turn.
+    processing = true;
+    cap.playChain
+      .catch(() => {})
+      .finally(() => {
+        console.log(`[vaaksetu timing ${who}] PLAYED +${Date.now() - endedAt}ms (streamed, ${cap.sentenceIndex} sentences)`);
+        processing = false;
+        post('status', { text: goLive ? '● Listening' : '' });
+        if (goLive) setTimeout(pumpQueue, 50);
+      });
+    return;
+  }
+
+  // Streaming failed or emitted nothing — fall back to a single batch turn
+  // off the MediaRecorder blob.
+  turnQueue.push({ who, pivotText: '', blob, endedAt });
   pumpQueue();
 }
 

@@ -21,6 +21,33 @@ import { isIndianLang, getLang } from './config.js';
 
 const SARVAM_VOICE = { male: 'anand', female: 'ritu' };
 
+// Translate + TTS one sentence → return base64 audio clips.
+// Used by the sentence-streaming path so the caller can serialize playback
+// across sentences while translation + TTS run in parallel for each.
+export async function pivotToAudio({ pivotText, targetLang, voiceGender = 'male', onStep, onText }) {
+  const tgtIndian = isIndianLang(targetLang);
+  const isTgtEnglish = targetLang === 'en-IN' || targetLang === 'en';
+  const targetLangName = getLang(targetLang).name;
+
+  let translatedText = pivotText;
+  if (!isTgtEnglish) {
+    onStep?.('translate', `Translating to ${targetLangName}…`);
+    translatedText = tgtIndian
+      ? await translateText({ text: pivotText, sourceLang: 'en-IN', targetLang })
+      : await groqTranslate({ text: pivotText, targetLangName });
+  }
+  onText?.(pivotText, translatedText);
+
+  onStep?.('tts', 'Generating voice…');
+  const audios = tgtIndian
+    ? await textToSpeech({ text: translatedText, languageCode: targetLang, speaker: SARVAM_VOICE[voiceGender] })
+    : [await elevenLabsTTS({ text: translatedText, voiceGender })];
+
+  return { pivotText, translatedText, audios };
+}
+
+export { playBase64Audio };
+
 // Batch path (push-to-talk): audio blob in, full pipeline.
 export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceGender = 'male', sinkId, onStep, onText }) {
   const step = (id, msg) => onStep?.(id, msg);

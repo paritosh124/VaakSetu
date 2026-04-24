@@ -29,6 +29,31 @@ async function playAll(audios) {
 }
 
 /**
+ * Sentence-streaming helper — translate + TTS one sentence, return base64
+ * audio clips without playing. The caller owns playback scheduling so that
+ * multiple in-flight sentences can translate in parallel while audio plays
+ * sequentially.
+ */
+export async function pivotToAudio({ pivotText, targetLang, voice, voiceGender, apiKey, onStep, onText }) {
+  const isTargetEnglish = targetLang === 'en-IN';
+  const tgtIndian = isIndianTarget(targetLang);
+  let translatedText = pivotText;
+
+  if (!isTargetEnglish && tgtIndian) {
+    onStep?.('translate', `Translating to ${targetLang.split('-')[0].toUpperCase()}…`);
+    translatedText = await translateText({ text: pivotText, sourceLang: 'en-IN', targetLang, apiKey });
+  }
+  onText?.(pivotText, translatedText);
+
+  onStep?.('tts', 'Generating voice…');
+  const speaker = voice || SARVAM_VOICE[voiceGender || 'male'] || 'anand';
+  const audioB64 = tgtIndian
+    ? await textToSpeech({ text: translatedText, languageCode: targetLang, speaker, apiKey })
+    : [await elevenLabsTTS({ text: translatedText, voiceGender: voiceGender || 'male', apiKey: import.meta.env.VITE_ELEVENLABS_API_KEY || '' })];
+  return { pivotText, translatedText, audioB64 };
+}
+
+/**
  * Sender half — used in remote (two-phone) mode.
  * Speech → English pivot text only. Result is sent to partner over WebRTC.
  */
