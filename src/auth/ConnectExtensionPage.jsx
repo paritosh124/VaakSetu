@@ -52,14 +52,33 @@ export function ConnectExtensionPage() {
       setBusy(false);
       return;
     }
-    // Bundle the Supabase URL + anon key with the session so the extension
-    // can refresh tokens later without needing build-time env injection.
+    // Build the payload explicitly rather than spreading the session.
+    // The Supabase Session object can have non-enumerable / proxy-backed
+    // properties that don't survive structured cloning across the
+    // chrome.runtime.sendMessage boundary, which has bitten us with
+    // access_token silently dropping out. Explicit beats clever.
+    if (!session.access_token) {
+      setStatus('Local session missing access_token. Sign out + back in and retry.');
+      setBusy(false);
+      return;
+    }
     const payload = {
-      ...session,
+      access_token:  session.access_token,
+      refresh_token: session.refresh_token,
+      token_type:    session.token_type,
+      expires_at:    session.expires_at,
+      expires_in:    session.expires_in,
+      user: {
+        id:    session.user?.id,
+        email: session.user?.email,
+        aud:   session.user?.aud,
+        role:  session.user?.role,
+      },
       _supabase_url:      import.meta.env.VITE_SUPABASE_URL || '',
       _supabase_anon_key: import.meta.env.VITE_SUPABASE_ANON_KEY || '',
       profile: { org_id: profile?.org_id, role: profile?.role },
     };
+    console.log('[connect-extension] sending session, has access_token:', !!payload.access_token, 'len:', payload.access_token.length);
     chrome.runtime.sendMessage(EXTENSION_ID, { type: 'auth-set-session', session: payload }, (response) => {
       setBusy(false);
       const lastErr = chrome.runtime.lastError;

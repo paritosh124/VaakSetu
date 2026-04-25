@@ -94,12 +94,24 @@ async function refreshAccessToken(session) {
 // null = not signed in or refresh failed; caller should prompt re-auth.
 export async function getAccessToken() {
   let session = await loadSession();
-  if (!session?.access_token) return null;
+  if (!session) {
+    console.warn('[vaaksetu auth] no session in chrome.storage.local');
+    return null;
+  }
+  if (!session.access_token) {
+    console.warn('[vaaksetu auth] session present but access_token missing — keys:', Object.keys(session));
+    return null;
+  }
   const now = Math.floor(Date.now() / 1000);
   const exp = session.expires_at || 0;
-  if (exp - now < 60) {
+  if (exp && exp - now < 60) {
+    console.log(`[vaaksetu auth] token expiring in ${exp - now}s, refreshing`);
     const refreshed = await refreshAccessToken(session);
-    if (!refreshed) return null;
+    if (!refreshed) {
+      console.warn('[vaaksetu auth] refresh failed — clearing session');
+      await clearSession();
+      return null;
+    }
     session = refreshed;
   }
   return session.access_token;
