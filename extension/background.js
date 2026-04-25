@@ -111,12 +111,25 @@ async function startSession(tabId) {
     console.warn('[bg] could not mute tab', tabId, e?.message);
   }
 
-  // Tell the widget in that tab to become visible.
+  // Tell the widget in that tab to become visible. If it's not loaded yet
+  // (content scripts only auto-inject into tabs loaded AFTER the extension
+  // reloaded), inject it programmatically and retry.
   try {
     await chrome.tabs.sendMessage(tabId, { event: 'show', agentLang, customerLang });
   } catch (e) {
-    // Widget may not be loaded on restricted pages (chrome://, Chrome Web Store).
-    console.warn('[bg] widget not reachable on tab', tabId, e?.message);
+    console.warn('[bg] widget not reachable, injecting now', e?.message);
+    try {
+      await chrome.scripting.insertCSS({ target: { tabId }, files: ['widget/widget.css'] });
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['widget/widget.js'] });
+      // Tiny delay so the content script's message listener is bound before
+      // we re-fire the show event.
+      await new Promise((r) => setTimeout(r, 80));
+      await chrome.tabs.sendMessage(tabId, { event: 'show', agentLang, customerLang });
+    } catch (injErr) {
+      // Restricted pages (chrome://, chrome-extension://, Chrome Web Store)
+      // don't allow content script injection. Surface a clearer message.
+      console.warn('[bg] widget inject failed', injErr?.message);
+    }
   }
 }
 
