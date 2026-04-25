@@ -20,33 +20,49 @@
 
 const STORAGE_KEY = 'vaaksetu_session';
 
-// Defensive guard: if chrome.storage isn't available (e.g. module is being
-// loaded outside an extension context, or during a service-worker boot that
-// hasn't finished setup), fail clean with a clear message instead of
-// "cannot read properties of undefined".
-function storage() {
-  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
-    throw new Error('chrome.storage.local unavailable in this context');
-  }
-  return chrome.storage.local;
+// Some extension contexts (notably offscreen documents in some Chrome
+// builds) don't have direct chrome.storage access, even though the service
+// worker and popup do. We try direct first; if it's missing or throws, we
+// fall back to asking the service worker via chrome.runtime.sendMessage.
+function hasDirectStorage() {
+  try { return !!(chrome && chrome.storage && chrome.storage.local); }
+  catch { return false; }
 }
 
 async function loadSession() {
+  if (hasDirectStorage()) {
+    try {
+      const result = await chrome.storage.local.get(STORAGE_KEY);
+      return result[STORAGE_KEY] || null;
+    } catch (err) {
+      console.warn('[vaaksetu auth] direct loadSession failed, falling back to SW:', err.message);
+    }
+  }
   try {
-    const result = await storage().get(STORAGE_KEY);
-    return result[STORAGE_KEY] || null;
+    const resp = await chrome.runtime.sendMessage({ type: 'auth-internal-get' });
+    return resp?.session || null;
   } catch (err) {
-    console.warn('[vaaksetu auth] loadSession failed:', err.message);
+    console.warn('[vaaksetu auth] SW loadSession failed:', err.message);
     return null;
   }
 }
 
 async function saveSession(session) {
-  await storage().set({ [STORAGE_KEY]: session });
+  if (hasDirectStorage()) {
+    try { await chrome.storage.local.set({ [STORAGE_KEY]: session }); return; }
+    catch (err) { console.warn('[vaaksetu auth] direct saveSession failed, falling back:', err.message); }
+  }
+  try { await chrome.runtime.sendMessage({ type: 'auth-internal-set', session }); }
+  catch (err) { console.warn('[vaaksetu auth] SW saveSession failed:', err.message); }
 }
 
 async function clearSession() {
-  try { await storage().remove(STORAGE_KEY); } catch {}
+  if (hasDirectStorage()) {
+    try { await chrome.storage.local.remove(STORAGE_KEY); return; }
+    catch {}
+  }
+  try { await chrome.runtime.sendMessage({ type: 'auth-internal-clear' }); }
+  catch {}
 }
 
 // Discovers the Supabase URL the extension should refresh tokens against.

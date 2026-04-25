@@ -145,10 +145,31 @@ async function stopSession() {
   activeTabId = null;
 }
 
+const SESSION_KEY = 'vaaksetu_session';
+
 // ─── Message router ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
+      // Auth session helpers — used by extension contexts (offscreen) that
+      // don't have direct chrome.storage access. Service worker is always
+      // allowed, so it acts as the storage broker.
+      if (msg?.type === 'auth-internal-get') {
+        const r = await chrome.storage.local.get(SESSION_KEY);
+        sendResponse({ session: r[SESSION_KEY] || null });
+        return;
+      }
+      if (msg?.type === 'auth-internal-set') {
+        await chrome.storage.local.set({ [SESSION_KEY]: msg.session });
+        sendResponse({ ok: true });
+        return;
+      }
+      if (msg?.type === 'auth-internal-clear') {
+        await chrome.storage.local.remove(SESSION_KEY);
+        sendResponse({ ok: true });
+        return;
+      }
+
       if (msg?.type === 'start') {
         await startSession(msg.tabId);
         sendResponse({ ok: true });
