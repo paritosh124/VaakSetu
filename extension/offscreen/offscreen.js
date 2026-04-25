@@ -63,6 +63,24 @@ function post(ev, extra = {}) {
   chrome.runtime.sendMessage({ to: 'widget', tabId: config.tabId, event: ev, ...extra }).catch(() => {});
 }
 
+// Detect Saaras / Whisper-family hallucinations on near-silent / noisy
+// audio. Common pattern: a single short word repeated dozens of times
+// ("yes, yes, yes, …", "okay, okay, …"). Real speech doesn't look like this.
+//
+// Rule: if >40% of the (>=2-word) tokens are the same single token AND there
+// are at least 8 of them, treat the pivot as hallucinated and skip the turn.
+function looksHallucinated(text) {
+  const t = (text || '').trim();
+  if (t.length < 10) return false;
+  // Strip punctuation, lowercase, split on whitespace.
+  const words = t.replace(/[.,!?।॥。;:'"()[\]{}]/g, '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length < 8) return false;
+  const counts = {};
+  for (const w of words) counts[w] = (counts[w] || 0) + 1;
+  const max = Math.max(...Object.values(counts));
+  return max / words.length > 0.4 && max >= 8;
+}
+
 // Translate raw error messages into something the widget user can act on.
 // Always logs the underlying error with stack to the offscreen console for
 // debugging — friendlyError() shouldn't hide the real problem.
@@ -266,9 +284,13 @@ async function runBatchTurn({ who, blob }) {
 //                        translation this much faster after they stop speaking.
 //   GAP_TOLERANCE_MS   — how long an inactive run has to be before we reset
 //                        the active accumulator (only while not yet armed).
-const SILENCE_THRESHOLD = 6;
+// Raised from 6 → 14: a fan / AC / room noise often registers around 8-12
+// sustained, which was triggering Saaras to hallucinate "yes yes yes…" on
+// effective silence. 14 is well above ambient but still well below normal
+// speech (~30-60 RMS at conversational distance).
+const SILENCE_THRESHOLD = 14;
 const SILENCE_MS = 700;            // dropped from 900 → faster turn end
-const MIN_SPEECH_MS = 320;
+const MIN_SPEECH_MS = 400;          // bump 320 → 400 to reject brief noise blips
 const GAP_TOLERANCE_MS = 250;
 const NO_SIGNAL_WARN_MS = 6000;
 
@@ -521,24 +543,33 @@ async function runTurn({ cap, pivotText, blob, endedAt }) {
 
   post('status', { text: `● Translating ${who === 'agent' ? 'your' : "customer's"} speech…` });
 
-  // Step-duration logger. Each call closes out the prior step and opens the
-  // new one, so the printed line is "<prior step> took X ms".
+  // Step-duration logger.
   let lastStepAt = endedAt;
   let lastStepName = null;
+  let firstAudioAt = 0;
   const stepDurations = [];
-  const closeStep = (msg = null) => {
+  const closeStep = (next) => {
     if (lastStepName) {
       const dur = Date.now() - lastStepAt;
       stepDurations.push({ step: lastStepName, ms: dur });
       console.log(`[vaaksetu timing ${who}] ${lastStepName.padEnd(10)} took ${String(dur).padStart(5)} ms (cumulative +${Date.now() - endedAt}ms)`);
     }
     lastStepAt = Date.now();
-    lastStepName = msg;
+    lastStepName = next;
   };
-  const onStep = (id, _msg) => closeStep(id);
+  const onStep = (id) => {
+    if (id === 'playing' && !firstAudioAt) firstAudioAt = Date.now();
+    closeStep(id);
+  };
+  let aborted = false;
   const onText = (pivot, translated) => {
     console.log(`[vaaksetu text ${who}] pivot (${sourceLang}): ${JSON.stringify(pivot)}`);
     console.log(`[vaaksetu text ${who}] final (${targetLang}): ${JSON.stringify(translated)}`);
+    if (looksHallucinated(pivot)) {
+      console.warn(`[vaaksetu] dropping turn — pivot looks hallucinated (likely silence/noise): "${pivot.slice(0, 80)}…"`);
+      aborted = true;
+      throw new Error('HALLUCINATED_PIVOT');
+    }
     post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText: pivot, translatedText: translated });
   };
 
@@ -561,14 +592,17 @@ async function runTurn({ cap, pivotText, blob, endedAt }) {
       return;
     }
 
-    const tReady = Date.now() - endedAt;
-    closeStep('tts'); // close out 'tts' step at moment of READY (first audio enqueued)
-    post('status', { text: `● Playing translation…` });
     await result.audioPromise;
-    closeStep('playing');
+    closeStep(null);
+    const tReady = firstAudioAt ? firstAudioAt - endedAt : Date.now() - endedAt;
     const breakdown = stepDurations.map((s) => `${s.step}=${s.ms}ms`).join(' ');
-    console.log(`[vaaksetu timing ${who}] SUMMARY READY +${tReady}ms | PLAYED +${Date.now() - endedAt}ms | ${breakdown}`);
+    console.log(`[vaaksetu timing ${who}] SUMMARY first-audio +${tReady}ms | played-end +${Date.now() - endedAt}ms | ${breakdown}`);
   } catch (err) {
+    if (aborted) {
+      // Hallucinated pivot — don't show a noisy error to the user.
+      post('status', { text: '' });
+      return;
+    }
     post('error', { error: friendlyError(err) });
   } finally {
     // Lock released only AFTER playback completes — the listener has heard
