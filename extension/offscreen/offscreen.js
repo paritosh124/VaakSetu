@@ -59,7 +59,10 @@ function post(ev, extra = {}) {
 }
 
 // Translate raw error messages into something the widget user can act on.
+// Always logs the underlying error with stack to the offscreen console for
+// debugging — friendlyError() shouldn't hide the real problem.
 function friendlyError(err) {
+  console.error('[vaaksetu pipeline error]', err?.message, err?.stack || err);
   const msg = err?.message || String(err) || 'Unknown error';
   if (msg === 'NOT_SIGNED_IN' || msg.includes('NOT_SIGNED_IN')) {
     return 'Signed out. Open the VaakSetu popup and sign in again.';
