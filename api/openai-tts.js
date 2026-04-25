@@ -1,8 +1,7 @@
 // OpenAI TTS proxy — returns raw mp3 binary
-import { handlePreflight } from './_cors.js';
+import { withAuth, logUsage, estimateCost } from './_auth.js';
 
-export default async function handler(req, res) {
-  if (handlePreflight(req, res)) return;
+export default withAuth(async function handler(req, res) {
   const response = await fetch('https://api.openai.com/v1/audio/speech', {
     method: 'POST',
     headers: {
@@ -20,4 +19,12 @@ export default async function handler(req, res) {
   const buffer = Buffer.from(await response.arrayBuffer());
   res.setHeader('Content-Type', 'audio/mpeg');
   res.status(200).send(buffer);
-}
+
+  const chars = (req.body?.input || '').length;
+  logUsage(req.auth, {
+    event_type: 'tts',
+    provider:   'openai',
+    chars,
+    api_cost_cents: estimateCost('openai_tts', { chars }),
+  });
+});

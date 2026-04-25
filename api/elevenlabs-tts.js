@@ -1,8 +1,7 @@
 // ElevenLabs TTS proxy — returns raw mp3 binary
-import { handlePreflight } from './_cors.js';
+import { withAuth, logUsage, estimateCost } from './_auth.js';
 
-export default async function handler(req, res) {
-  if (handlePreflight(req, res)) return;
+export default withAuth(async function handler(req, res) {
   // voice_id is passed as the last path segment: /api/elevenlabs-tts/VOICE_ID
   const voiceId = req.query.voiceId || req.url.split('/').pop();
 
@@ -23,4 +22,12 @@ export default async function handler(req, res) {
   const buffer = Buffer.from(await response.arrayBuffer());
   res.setHeader('Content-Type', 'audio/mpeg');
   res.status(200).send(buffer);
-}
+
+  const chars = (req.body?.text || '').length;
+  logUsage(req.auth, {
+    event_type: 'tts',
+    provider:   'elevenlabs',
+    chars,
+    api_cost_cents: estimateCost('elevenlabs_tts', { chars }),
+  });
+});

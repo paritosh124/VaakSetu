@@ -8,10 +8,14 @@
  *       We use /transcriptions (original language text) then translate with Llama.
  */
 
-// Dev: Vite proxy /groq → https://api.groq.com
-// Prod: Vercel serverless functions at /api/groq-*
-const STT_URL  = import.meta.env.DEV ? '/groq/openai/v1/audio/transcriptions' : '/api/groq-stt-translate';
-const CHAT_URL = import.meta.env.DEV ? '/groq/openai/v1/chat/completions'      : '/api/groq-chat';
+import { authedFetch } from '../lib/authed-fetch.js';
+
+// useApi=true → hit /api/groq-* (auth + usage logging). Otherwise hit Vite's
+// /groq/* proxy directly (fast UI iteration without login).
+const useApi = !import.meta.env.DEV || import.meta.env.VITE_USE_API === '1';
+const STT_URL  = useApi ? '/api/groq-stt-translate' : '/groq/openai/v1/audio/transcriptions';
+const CHAT_URL = useApi ? '/api/groq-chat'           : '/groq/openai/v1/chat/completions';
+const doFetch = (url, opts) => (useApi ? authedFetch(url, opts) : fetch(url, opts));
 
 // Speech → original language text
 async function groqTranscribe({ audioBlob, apiKey, sourceLang }) {
@@ -25,7 +29,7 @@ async function groqTranscribe({ audioBlob, apiKey, sourceLang }) {
   const headers = {};
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
-  const res = await fetch(STT_URL, { method: 'POST', headers, body: fd });
+  const res = await doFetch(STT_URL, { method: 'POST', headers, body: fd });
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -50,7 +54,7 @@ export async function groqTranslate({ text, targetLangName, apiKey }) {
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
-  const res = await fetch(CHAT_URL, {
+  const res = await doFetch(CHAT_URL, {
     method: 'POST',
     headers,
     body: JSON.stringify({

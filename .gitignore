@@ -5,3 +5,4 @@ dist/
 .vercel
 BUSINESS_PLAN.md
 TESTING_PLAN.txt
+.env.local

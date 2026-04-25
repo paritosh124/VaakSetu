@@ -10,10 +10,9 @@
 //   • Route TTS playback to a user-selected sinkId (VB-Cable etc.).
 // The Meet tab itself is muted by background.js (chrome.tabs.update) so the
 // agent hears only translated audio, never the raw customer voice.
-import { translateAudio, pivotToSpeech, pivotToAudio, playBase64Audio } from '../lib/pipeline.js';
+import { translateAudio, pivotToSpeech, playBase64Audio } from '../lib/pipeline.js';
 import { getLang, isIndianLang } from '../lib/config.js';
-import { supportsStreamingSTT } from '../lib/api/sarvam-streaming.js';
-import { SarvamSentenceStreamer } from '../lib/api/sarvam-sentence-streamer.js';
+import { SarvamStreamingSTT, supportsStreamingSTT } from '../lib/api/sarvam-streaming.js';
 
 let config = null;
 let tabStream = null;
@@ -34,28 +33,25 @@ let recorder = null;
 let recording = null;
 let chunks = [];
 
-// Go Live state
+// Go Live state — turn-based.
+//
+// One global lock: whoever's VAD arms first holds the turn until their
+// translation has finished playing. The opposite side's VAD events are
+// ignored while the lock is held. This is much more reliable than dual-
+// concurrent captures with sentence streaming — no speaker confusion, no
+// queue draining of stale audio, predictable ~2.5s end-of-speech-to-first-
+// audio latency.
 let goLive = false;
 let vadLoops = {};                      // { customer, agent }
-let turnQueue = [];                     // batch-fallback turns only
-let processing = false;
-// Per-speaker capture slots so both sides can run concurrently — a customer
-// can interrupt / start their turn while the agent is still finishing.
-let activeCaptures = { agent: null, customer: null };
-// Per-direction playback chain. Agent-direction translation plays on
-// sinkAgent (usually VCC → customer's Meet mic); customer-direction plays on
-// sinkCustomer (usually headphones). They're independent audio devices, so
-// their chains must be independent too — otherwise a long customer
-// translation would block an agent-direction sentence from reaching the
-// customer in time.
-let playChains = { agent: Promise.resolve(), customer: Promise.resolve() };
+let activeCapture = null;               // { who, streamer, mediaRecorder, … }
+let turnLock = false;                   // true from speech-start through TTS completion
 
-// Cross-talk suppression — when both VADs fire within this window we treat
-// it as acoustic leak (agent speakers bleeding into tab audio, or vice
-// versa) and keep only the louder stream.
-const CROSSTALK_WINDOW_MS = 250;
-const CROSSTALK_RMS_DOMINANCE = 1.3;
-let lastSpeechStartAt = { agent: 0, customer: 0 };
+// Cross-talk safety: if a fresh speech-start fires while we're already
+// capturing, compare RMS — if the new side is dramatically louder than the
+// captor, switch to the louder one (catches the case where the lock-holder
+// was actually echo from the speakers and the real speaker is the other
+// side). Otherwise just ignore.
+const CROSSTALK_RMS_DOMINANCE = 1.6;
 
 function post(ev, extra = {}) {
   if (!config?.tabId) return;
@@ -251,7 +247,7 @@ async function runBatchTurn({ who, blob }) {
 //   GAP_TOLERANCE_MS   — how long an inactive run has to be before we reset
 //                        the active accumulator (only while not yet armed).
 const SILENCE_THRESHOLD = 6;
-const SILENCE_MS = 900;
+const SILENCE_MS = 700;            // dropped from 900 → faster turn end
 const MIN_SPEECH_MS = 320;
 const GAP_TOLERANCE_MS = 250;
 const NO_SIGNAL_WARN_MS = 6000;
@@ -380,11 +376,8 @@ async function startGoLive() {
   }
 
   goLive = true;
-  turnQueue = [];
-  processing = false;
-  activeCaptures = { agent: null, customer: null };
-  playChains = { agent: Promise.resolve(), customer: Promise.resolve() };
-  lastSpeechStartAt = { agent: 0, customer: 0 };
+  activeCapture = null;
+  turnLock = false;
   post('goLive', { on: true });
   post('status', { text: '● Listening' });
 
@@ -413,60 +406,62 @@ async function stopGoLive() {
   goLive = false;
   for (const k of Object.keys(vadLoops)) vadLoops[k]?.stop?.();
   vadLoops = {};
-  for (const k of Object.keys(activeCaptures)) {
-    const cap = activeCaptures[k];
-    if (!cap) continue;
-    try { await cap.streamer?.destroy?.(); } catch {}
-    try { cap.mediaRecorder?.stop?.(); } catch {}
-    activeCaptures[k] = null;
+  if (activeCapture) {
+    try { await activeCapture.streamer?.destroy?.(); } catch {}
+    try { activeCapture.mediaRecorder?.stop?.(); } catch {}
+    activeCapture = null;
   }
-  turnQueue = [];
-  processing = false;
+  turnLock = false;
   post('goLive', { on: false });
   post('status', { text: '' });
   post('partial', { text: '', clear: true });
 }
 
+// ─── Turn-based capture ─────────────────────────────────────────────────────
+//
+// One speaker at a time. The first VAD to arm wins the lock; the other side
+// is silenced until the current turn's translation has finished playing.
+// This prevents speaker confusion and the queue-draining 8s "where did this
+// audio come from" effect of dual-VAD sentence streaming.
+
 async function beginCapture(who) {
   if (!goLive) return;
-  if (activeCaptures[who]) return; // already capturing this side's turn
 
-  // Cross-talk check — if the OTHER side fired speech-start very recently
-  // and is currently louder than us, the sound we're hearing is almost
-  // certainly a leak (agent's voice bleeding into tab audio through
-  // speakers, or translation output bleeding into mic). Skip this side.
-  const other = who === 'customer' ? 'agent' : 'customer';
-  const otherStart = lastSpeechStartAt[other];
-  if (otherStart && Date.now() - otherStart < CROSSTALK_WINDOW_MS) {
-    const myRms    = vadLoops[who]?.rms?.()    ?? 0;
-    const otherRms = vadLoops[other]?.rms?.()  ?? 0;
-    if (otherRms > myRms * CROSSTALK_RMS_DOMINANCE) {
-      console.log(`[vaaksetu cross-talk] dropped ${who} speech-start (otherRms=${otherRms.toFixed(1)} > myRms=${myRms.toFixed(1)} × ${CROSSTALK_RMS_DOMINANCE})`);
+  // Lock taken — defer to the active speaker UNLESS the new arrival is
+  // dramatically louder (rare; signals the lock-holder is actually echo).
+  if (turnLock) {
+    const myRms    = vadLoops[who]?.rms?.()                    ?? 0;
+    const heldRms  = vadLoops[activeCapture?.who]?.rms?.()     ?? 0;
+    if (myRms < heldRms * CROSSTALK_RMS_DOMINANCE) {
       return;
     }
+    console.log(`[vaaksetu cross-talk] hijack: ${activeCapture?.who} → ${who} (heldRms=${heldRms.toFixed(1)}, newRms=${myRms.toFixed(1)})`);
+    // Release current capture without processing — it was probably echo.
+    try { await activeCapture?.streamer?.destroy?.(); } catch {}
+    try { activeCapture?.mediaRecorder?.stop?.(); } catch {}
+    activeCapture = null;
   }
-  lastSpeechStartAt[who] = Date.now();
 
-  const stream = who === 'customer' ? tabStream : micStream;
-  const sourceLang = who === 'customer' ? config.customerLang : config.agentLang;
-  const targetLang = who === 'customer' ? config.agentLang    : config.customerLang;
-  const voiceGender = who === 'agent' ? config.agentVoice : config.customerVoice;
-  const srcLabel = `${getLang(sourceLang).native} (${who === 'customer' ? 'Customer' : 'Agent'})`;
-  const tgtLabel = `${getLang(targetLang).native} (${who === 'customer' ? 'Agent' : 'Customer'})`;
+  turnLock = true;
+
+  const stream      = who === 'customer' ? tabStream : micStream;
+  const sourceLang  = who === 'customer' ? config.customerLang : config.agentLang;
+  const targetLang  = who === 'customer' ? config.agentLang    : config.customerLang;
+  const voiceGender = who === 'agent'    ? config.agentVoice   : config.customerVoice;
+  const srcLabel    = `${getLang(sourceLang).native} (${who === 'customer' ? 'Customer' : 'Agent'})`;
+  const tgtLabel    = `${getLang(targetLang).native} (${who === 'customer' ? 'Agent' : 'Customer'})`;
 
   const cap = {
     who, sourceLang, targetLang, voiceGender, srcLabel, tgtLabel,
     streamer: null, mediaRecorder: null, parts: [],
     blobPromise: null, blobResolve: null,
     startedAt: Date.now(),
-    firstAudioAt: 0,
-    sentenceIndex: 0,
   };
-  activeCaptures[who] = cap;
-  post('status', { text: `● Listening (${who})…` });
+  activeCapture = cap;
+  post('status', { text: `● ${who === 'agent' ? 'You' : 'Customer'} speaking…` });
 
-  // MediaRecorder always runs in parallel — it's the fallback for intl source
-  // (no streaming STT for non-Indian) and a safety net if the WebSocket drops.
+  // MediaRecorder runs in parallel as the batch fallback (intl source has no
+  // streaming STT) and as a safety net if the WS drops.
   try {
     const mime = pickMimeType();
     cap.mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
@@ -481,88 +476,43 @@ async function beginCapture(who) {
     post('error', { error: `Recorder failed: ${err.message}` });
   }
 
-  // Streaming STT only supports Sarvam's Indian language set. When available,
-  // we fire translate+TTS PER SENTENCE so the listener hears the first
-  // translated sentence while the speaker is still producing the next.
+  // Whole-utterance streaming STT (Indian source only). The listener won't
+  // hear sentence-by-sentence — they hear the full translation once the
+  // speaker stops. Predictable, no speaker confusion.
   if (isIndianLang(sourceLang)) {
     const mode = sourceLang === 'en-IN' ? 'transcribe' : 'translate';
-    cap.streamer = new SarvamSentenceStreamer({
-      languageCode: sourceLang,
-      mode,
+    cap.streamer = new SarvamStreamingSTT({
+      languageCode: sourceLang, mode,
       onPartial: (text) => post('partial', { who, text }),
-      onSentence: (sentence, isFinal) => handleSentence(cap, sentence, isFinal),
     });
     try {
       await cap.streamer.start(stream);
     } catch (err) {
-      cap.streamer = null; // streaming failed — fall through to batch on endCapture
-      console.warn('[offscreen] streaming start failed, will use batch:', err.message);
+      cap.streamer = null;
+      console.warn('[offscreen] streaming STT start failed, will use batch:', err.message);
     }
   }
-}
-
-// Fires a sentence through translate+TTS immediately; playback is chained to
-// preserve order across sentences within the same turn. Translation and TTS
-// for sentence N run in parallel with the playback of sentence N-1.
-function handleSentence(cap, sentence, isFinal) {
-  const idx = cap.sentenceIndex++;
-  const tStart = Date.now();
-  console.log(`[vaaksetu sentence ${cap.who} #${idx}] "${sentence}" isFinal=${isFinal}`);
-  post('status', { text: `● Translating (${cap.who})…` });
-
-  // Kick off translate + TTS immediately (non-blocking).
-  const audioPromise = pivotToAudio({
-    pivotText: sentence,
-    targetLang: cap.targetLang,
-    voiceGender: cap.voiceGender,
-    onText: (pivot, translated) => {
-      console.log(`[vaaksetu text ${cap.who} #${idx}] pivot: ${JSON.stringify(pivot)} → ${JSON.stringify(translated)}`);
-      post('message', {
-        id: Date.now() + idx,
-        who: cap.who,
-        srcLabel: cap.srcLabel,
-        tgtLabel: cap.tgtLabel,
-        pivotText: pivot,
-        translatedText: translated,
-      });
-    },
-  }).catch((err) => {
-    post('error', { error: err.message || String(err) });
-    return { audios: [] };
-  });
-
-  // Chain playback on the PER-DIRECTION chain so sentences play in order
-  // within a direction (agent-to-customer stays ordered) but the two
-  // directions run concurrently on their separate output devices.
-  playChains[cap.who] = playChains[cap.who].then(async () => {
-    const { audios = [] } = await audioPromise;
-    if (!cap.firstAudioAt) {
-      cap.firstAudioAt = Date.now();
-      console.log(`[vaaksetu sentence ${cap.who} #${idx}] first audio at +${cap.firstAudioAt - tStart}ms after sentence detected`);
-    }
-    for (const b64 of audios) {
-      if (b64) await playBase64Audio(b64, { sinkId: sinkFor(cap.who) });
-    }
-  }).catch((err) => console.error('[vaaksetu playChain]', err));
 }
 
 async function endCapture(who) {
-  const cap = activeCaptures[who];
-  if (!cap || !goLive) return; // stale event
-  activeCaptures[who] = null;
+  const cap = activeCapture;
+  if (!cap || cap.who !== who || !goLive) return; // stale event
+  activeCapture = null;
 
   const endedAt = Date.now();
 
-  let streamedOk = false;
+  // Pull the streaming pivot (returns last partial almost instantly under the
+  // fast-path stop()).
+  let pivotText = '';
   if (cap.streamer) {
     const tStop = Date.now();
-    try {
-      await cap.streamer.stop();
-      streamedOk = true;
-    } catch (e) { console.warn('[offscreen] streamer.stop failed', e?.message); }
-    console.log(`[vaaksetu timing ${who}] streamer.stop() took ${Date.now() - tStop}ms`);
+    try { pivotText = (await cap.streamer.stop()) || ''; }
+    catch (e) { console.warn('[offscreen] streamer.stop failed', e?.message); }
+    console.log(`[vaaksetu timing ${who}] streamer.stop took ${Date.now() - tStop}ms; pivot=${JSON.stringify(pivotText.slice(0, 80))}`);
   }
 
+  // Pull the recorder blob — used as the batch fallback when streaming
+  // produced nothing or the source is intl.
   let blob = null;
   try {
     if (cap.mediaRecorder && cap.mediaRecorder.state !== 'inactive') cap.mediaRecorder.stop();
@@ -570,88 +520,53 @@ async function endCapture(who) {
   } catch {}
 
   post('partial', { who, text: '', clear: true });
-
-  if (streamedOk && cap.sentenceIndex > 0) {
-    // Sentences already fired incrementally during capture. We do NOT block
-    // the opposite speaker here — each direction has its own playChain and
-    // runs concurrently (agent can keep speaking while customer's current
-    // translation is still playing, and vice versa).
-    playChains[who].catch(() => {}).finally(() => {
-      console.log(`[vaaksetu timing ${who}] PLAYED +${Date.now() - endedAt}ms (streamed, ${cap.sentenceIndex} sentences)`);
-    });
-    if (!activeCaptures.agent && !activeCaptures.customer) {
-      post('status', { text: goLive ? '● Listening' : '' });
-    }
-    return;
-  }
-
-  // Streaming failed or produced nothing — batch-pipeline the blob.
-  turnQueue.push({ who, pivotText: '', blob, endedAt });
-  pumpQueue();
+  await runTurn({ cap, pivotText, blob, endedAt });
 }
 
-async function pumpQueue() {
-  if (processing || !goLive) return;
-  const turn = turnQueue.shift();
-  if (!turn) return;
-  processing = true;
-
-  const { who, pivotText, blob, endedAt } = turn;
-  const sourceLang = who === 'customer' ? config.customerLang : config.agentLang;
-  const targetLang = who === 'customer' ? config.agentLang    : config.customerLang;
-  // Speaker-preference (see runBatchTurn).
-  const voiceGender = who === 'agent' ? config.agentVoice : config.customerVoice;
-  const srcLabel = `${getLang(sourceLang).native} (${who === 'customer' ? 'Customer' : 'Agent'})`;
-  const tgtLabel = `${getLang(targetLang).native} (${who === 'customer' ? 'Agent' : 'Customer'})`;
+async function runTurn({ cap, pivotText, blob, endedAt }) {
+  const { who, sourceLang, targetLang, voiceGender, srcLabel, tgtLabel } = cap;
   const messageId = Date.now();
 
-  // NOTE: no longer pausing the opposite VAD during playback. Concurrent
-  // captures + playback are allowed so a customer can start speaking while
-  // the agent's translation is still finishing. Cross-talk suppression in
-  // beginCapture() handles the feedback case via RMS comparison.
-  post('status', { text: `● Translating (${who})…` });
+  post('status', { text: `● Translating ${who === 'agent' ? 'your' : "customer's"} speech…` });
+
+  const latencyStep = (msg) =>
+    console.log(`[vaaksetu timing ${who}] +${Date.now() - endedAt}ms ${msg}`);
+  const onStep = (_id, msg) => { latencyStep(msg); };
+  const onText = (pivot, translated) => {
+    console.log(`[vaaksetu text ${who}] pivot (${sourceLang}): ${JSON.stringify(pivot)}`);
+    console.log(`[vaaksetu text ${who}] final (${targetLang}): ${JSON.stringify(translated)}`);
+    post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText: pivot, translatedText: translated });
+  };
 
   try {
-    // End-to-end latency — from VAD speech-end to end-of-playback.
-    const latencyStep = (msg) =>
-      console.log(`[vaaksetu timing ${who}] +${Date.now() - endedAt}ms ${msg}`);
-    const onStep = (_id, msg) => { latencyStep(msg); post('status', { text: msg }); };
-    const onText = (pivot, translated) => {
-      // Log both so the user can tell STT-quality issues from translation-quality.
-      console.log(`[vaaksetu text ${who}] pivot (${sourceLang}): ${JSON.stringify(pivot)}`);
-      console.log(`[vaaksetu text ${who}] final (${targetLang}): ${JSON.stringify(translated)}`);
-      post('message', { id: messageId, who, srcLabel, tgtLabel, pivotText: pivot, translatedText: translated });
-    };
-
+    let result;
     if (pivotText) {
-      // Fast path: streaming STT already produced English pivot.
       latencyStep('STT done (streaming)');
-      const result = await pivotToSpeech({
+      result = await pivotToSpeech({
         pivotText, sourceLang, targetLang, voiceGender,
         sinkId: sinkFor(who), onStep, onText,
       });
-      const tReady = Date.now() - endedAt;
-      await result.audioPromise;
-      console.log(`[vaaksetu timing ${who}] READY +${tReady}ms | PLAYED +${Date.now() - endedAt}ms`);
     } else if (blob && blob.size >= 1000) {
-      // Intl source or streaming failed — batch pipeline off the MediaRecorder blob.
-      const result = await translateAudio({
-        audioBlob: blob,
-        sourceLang, targetLang, voiceGender,
+      result = await translateAudio({
+        audioBlob: blob, sourceLang, targetLang, voiceGender,
         sinkId: sinkFor(who), onStep, onText,
       });
-      const tReady = Date.now() - endedAt;
-      await result.audioPromise;
-      console.log(`[vaaksetu timing ${who}] READY +${tReady}ms | PLAYED +${Date.now() - endedAt}ms`);
     } else {
       post('status', { text: 'Too short — keep speaking.' });
+      return;
     }
+
+    const tReady = Date.now() - endedAt;
+    post('status', { text: `● Playing translation…` });
+    await result.audioPromise;
+    console.log(`[vaaksetu timing ${who}] READY +${tReady}ms | PLAYED +${Date.now() - endedAt}ms`);
   } catch (err) {
     post('error', { error: err.message || String(err) });
   } finally {
-    post('status', { text: goLive ? '● Listening' : '' });
-    processing = false;
-    if (goLive) setTimeout(pumpQueue, 150);
+    // Lock released only AFTER playback completes — the listener has heard
+    // the message before the other side's VAD can grab the floor.
+    turnLock = false;
+    if (goLive) post('status', { text: '● Ready' });
   }
 }
 

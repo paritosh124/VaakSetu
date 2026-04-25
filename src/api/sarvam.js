@@ -10,7 +10,17 @@
  * In prod, swap BASE to 'https://api.sarvam.ai' or route through your own proxy.
  */
 
-const BASE = import.meta.env.DEV ? '/sarvam' : '/api';
+import { authedFetch } from '../lib/authed-fetch.js';
+
+// Two routing modes:
+//   • Vite-only (npm run dev) → hit Sarvam directly via Vite proxies (/sarvam,
+//     /groq, etc). No auth, no usage tracking — fast UI iteration.
+//   • Vercel + auth        → hit our /api/* serverless proxies, which validate
+//     the JWT and write usage_events. Triggered by EITHER a prod build OR the
+//     dev override VITE_USE_API=1 (set in .env.local when running `vercel dev`).
+const useApi = !import.meta.env.DEV || import.meta.env.VITE_USE_API === '1';
+const BASE = useApi ? '/api' : '/sarvam';
+const doFetch = (url, opts) => (useApi ? authedFetch(url, opts) : fetch(url, opts));
 
 // Sarvam STT uses 'or-IN' for Odia; Translate and TTS use 'od-IN'
 const toSTTCode    = (c) => c === 'od-IN' ? 'or-IN' : c;
@@ -27,7 +37,7 @@ export async function speechToText({ audioBlob, languageCode, mode = 'transcribe
   fd.append('mode', mode);
   fd.append('language_code', toSTTCode(languageCode)); // pass 'unknown' for auto-detect
 
-  const res = await fetch(`${BASE}/speech-to-text`, {
+  const res = await doFetch(`${BASE}/speech-to-text`, {
     method: 'POST',
     headers: { 'api-subscription-key': apiKey },
     body: fd,
@@ -50,7 +60,7 @@ export async function speechToText({ audioBlob, languageCode, mode = 'transcribe
 // Mayura only supports English ↔ Indian languages (not Indian ↔ Indian direct).
 // We always translate from/to 'en-IN' as the pivot language.
 export async function translateText({ text, sourceLang, targetLang, apiKey }) {
-  const res = await fetch(`${BASE}/translate`, {
+  const res = await doFetch(`${BASE}/translate`, {
     method: 'POST',
     headers: {
       'api-subscription-key': apiKey,
@@ -77,7 +87,7 @@ export async function translateText({ text, sourceLang, targetLang, apiKey }) {
 
 // ─── Text to Speech ──────────────────────────────────────────────────────────
 export async function textToSpeech({ text, languageCode, speaker = 'Anand', apiKey }) {
-  const res = await fetch(`${BASE}/text-to-speech`, {
+  const res = await doFetch(`${BASE}/text-to-speech`, {
     method: 'POST',
     headers: {
       'api-subscription-key': apiKey,

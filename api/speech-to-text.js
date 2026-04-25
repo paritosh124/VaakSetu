@@ -1,9 +1,9 @@
-import { handlePreflight } from './_cors.js';
+import { withAuth, logUsage, estimateCost } from './_auth.js';
 
 export const config = { api: { bodyParser: false } };
 
-export default async function handler(req, res) {
-  if (handlePreflight(req, res)) return;
+export default withAuth(async function handler(req, res) {
+  const t0 = Date.now();
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const body = Buffer.concat(chunks);
@@ -19,4 +19,16 @@ export default async function handler(req, res) {
 
   const data = await response.json();
   res.status(response.status).json(data);
-}
+
+  if (response.ok) {
+    const duration_ms = Date.now() - t0;
+    const chars = (data?.transcript || '').length;
+    logUsage(req.auth, {
+      event_type: 'stt',
+      provider:   'sarvam',
+      source_lang: data?.language_code || null,
+      chars, duration_ms,
+      api_cost_cents: estimateCost('sarvam_stt', { duration_ms, chars }),
+    });
+  }
+});

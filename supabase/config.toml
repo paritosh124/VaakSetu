@@ -1,0 +1,42 @@
+project_id = "vaaksetu"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+# Magic-link / OAuth emails from `supabase start` land in Inbucket at :54324
+# so you can click them in local dev without a real mail server.
+[inbucket]
+enabled = true
+port = 54324
+
+[auth]
+enabled = true
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173", "https://vaak-setu.vercel.app"]
+jwt_expiry = 3600
+enable_signup = true
+
+[auth.email]
+enable_signup = true
+double_confirm_changes = false
+enable_confirmations = false
+
+# Enable the OAuth providers in Studio (localhost:54323 → Authentication →
+# Providers) or via env. Each needs a client_id + secret from the provider.
+[auth.external.google]
+enabled = false
+[auth.external.github]
+enabled = false
+[auth.external.azure]
+enabled = false

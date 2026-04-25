@@ -6,7 +6,11 @@
  * In prod, serverless functions at /api/openai-* inject OPENAI_API_KEY
  */
 
-const BASE = import.meta.env.DEV ? '/openai' : '/api';
+import { authedFetch } from '../lib/authed-fetch.js';
+
+const useApi = !import.meta.env.DEV || import.meta.env.VITE_USE_API === '1';
+const BASE = useApi ? '/api' : '/openai';
+const doFetch = (url, opts) => (useApi ? authedFetch(url, opts) : fetch(url, opts));
 
 export function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -23,7 +27,7 @@ export async function openaiSpeechToText({ audioBlob, apiKey }) {
   fd.append('model', 'whisper-1');
   fd.append('response_format', 'json');
 
-  const res = await fetch(`${BASE}/openai-stt`, {
+  const res = await doFetch(`${BASE}/openai-stt`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}` },
     body: fd,
@@ -46,7 +50,7 @@ export async function openaiSpeechToEnglish({ audioBlob, apiKey }) {
   fd.append('model', 'whisper-1');
   fd.append('response_format', 'json');
 
-  const res = await fetch(`${BASE}/openai-stt-translate`, {
+  const res = await doFetch(`${BASE}/openai-stt-translate`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}` },
     body: fd,
@@ -63,7 +67,7 @@ export async function openaiSpeechToEnglish({ audioBlob, apiKey }) {
 
 // ─── Translate text via GPT-4o-mini ──────────────────────────────────────────
 export async function openaiTranslate({ text, targetLangName, apiKey }) {
-  const res = await fetch(`${BASE}/openai-chat`, {
+  const res = await doFetch(`${BASE}/openai-chat`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -94,7 +98,7 @@ export async function openaiTranslate({ text, targetLangName, apiKey }) {
 // ─── Text → Speech (TTS-1) → base64 mp3 ─────────────────────────────────────
 // Returns base64 string compatible with playBase64Audio in sarvam.js
 export async function openaiTTS({ text, voice = 'onyx', apiKey }) {
-  const res = await fetch(`${BASE}/openai-tts`, {
+  const res = await doFetch(`${BASE}/openai-tts`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,

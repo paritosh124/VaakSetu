@@ -1,4 +1,4 @@
-import { INDIAN_LANGS, INTL_LANGS } from '../lib/config.js';
+import { PICKER_INDIAN_LANGS as INDIAN_LANGS, PICKER_INTL_LANGS as INTL_LANGS } from '../lib/config.js';
 
 const agentLangEl    = document.getElementById('agentLang');
 const customerLangEl = document.getElementById('customerLang');

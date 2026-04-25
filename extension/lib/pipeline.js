@@ -9,41 +9,37 @@
 //              target Indian   → Sarvam Mayura
 //              target intl     → Groq Llama
 //   TTS:       target Indian   → Sarvam Bulbul v3  (native Indic voice quality)
-//              target intl     → ElevenLabs Turbo v2.5
-//
-// Why hybrid: ElevenLabs sounds unnatural for Indic output and Bulbul can't
-// speak European languages. Letting each step pick its best engine keeps
-// intl→Indian pairs (the common call-center case) using Sarvam voices.
+//              target intl     → OpenAI TTS-1     (~12× cheaper than ElevenLabs
+//                                                  for comparable Spanish quality)
 import { speechToText, translateText, textToSpeech, playBase64Audio } from './api/sarvam.js';
 import { groqSpeechToEnglish, groqTranslate } from './api/groq.js';
-import { elevenLabsTTS } from './api/elevenlabs.js';
+import { openaiTTS } from './api/openai.js';
 import { isIndianLang, getLang } from './config.js';
 
 const SARVAM_VOICE = { male: 'anand', female: 'ritu' };
 
-// Translate + TTS one sentence → return base64 audio clips.
-// Used by the sentence-streaming path so the caller can serialize playback
-// across sentences while translation + TTS run in parallel for each.
-export async function pivotToAudio({ pivotText, targetLang, voiceGender = 'male', onStep, onText }) {
-  const tgtIndian = isIndianLang(targetLang);
-  const isTgtEnglish = targetLang === 'en-IN' || targetLang === 'en';
-  const targetLangName = getLang(targetLang).name;
+// Aggressive first-chunk split — peels off the first sentence (or clause if
+// the first sentence runs long) so its TTS round-trip overlaps with TTS for
+// the remainder. For multi-sentence translations the listener hears speech
+// ~600-1000ms sooner; for a single short sentence the input is unchanged.
+const FIRST_CHUNK_MAX = 90;
+const SENTENCE_END_RE = /[.!?।॥。](\s|$)/;
+function splitForFastFirstChunk(text) {
+  const t = (text || '').trim();
+  if (t.length <= FIRST_CHUNK_MAX) return [t];
 
-  let translatedText = pivotText;
-  if (!isTgtEnglish) {
-    onStep?.('translate', `Translating to ${targetLangName}…`);
-    translatedText = tgtIndian
-      ? await translateText({ text: pivotText, sourceLang: 'en-IN', targetLang })
-      : await groqTranslate({ text: pivotText, targetLangName });
+  // Try a sentence end within the first FIRST_CHUNK_MAX chars.
+  const head = t.slice(0, FIRST_CHUNK_MAX + 30);
+  const m = head.match(SENTENCE_END_RE);
+  if (m && m.index >= 5) {
+    const cut = m.index + 1;
+    return [t.slice(0, cut).trim(), t.slice(cut).trim()];
   }
-  onText?.(pivotText, translatedText);
-
-  onStep?.('tts', 'Generating voice…');
-  const audios = tgtIndian
-    ? await textToSpeech({ text: translatedText, languageCode: targetLang, speaker: SARVAM_VOICE[voiceGender] })
-    : [await elevenLabsTTS({ text: translatedText, voiceGender })];
-
-  return { pivotText, translatedText, audios };
+  // Fall back to a clause-level cut at the last comma/colon before the limit.
+  const window = t.slice(0, FIRST_CHUNK_MAX);
+  const cma = Math.max(window.lastIndexOf(', '), window.lastIndexOf('; '), window.lastIndexOf(': '));
+  if (cma >= 20) return [t.slice(0, cma + 1).trim(), t.slice(cma + 1).trim()];
+  return [t]; // no good split — let the TTS handle it as one piece
 }
 
 export { playBase64Audio };
@@ -53,14 +49,12 @@ export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceG
   const step = (id, msg) => onStep?.(id, msg);
   const srcIndian = isIndianLang(sourceLang);
 
-  // Step 1: Speech → English pivot.
   let pivotText;
   if (srcIndian) {
     const isSrcEn = sourceLang === 'en-IN';
     step('stt', isSrcEn ? 'Transcribing…' : 'Recognising & converting to English…');
     const sttResult = await speechToText({
-      audioBlob,
-      languageCode: sourceLang,
+      audioBlob, languageCode: sourceLang,
       mode: isSrcEn ? 'transcribe' : 'translate',
     });
     pivotText = sttResult.transcript;
@@ -72,14 +66,13 @@ export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceG
   return pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGender, sinkId, onStep, onText });
 }
 
-// Streaming path: pivot already produced by Sarvam streaming STT — skip Step 1.
+// Streaming path (Go Live): pivot already produced by Sarvam streaming STT.
 export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGender = 'male', sinkId, onStep, onText }) {
   const step = (id, msg) => onStep?.(id, msg);
   const tgtIndian = isIndianLang(targetLang);
   const isTgtEnglish = targetLang === 'en-IN' || targetLang === 'en';
   const targetLangName = getLang(targetLang).name;
 
-  // Step 2: English pivot → target text.
   let translatedText = pivotText;
   if (!isTgtEnglish) {
     step('translate', `Translating to ${targetLangName}…`);
@@ -89,23 +82,22 @@ export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGe
   }
   onText?.(pivotText, translatedText);
 
-  // Step 3: Text → Speech.
-  // Indian target: Bulbul is per-chunk and each chunk is ≤ a few hundred
-  // chars — we pipeline the requests into the playback queue so chunk 1 plays
-  // while chunk 2 is still on the wire. This is the single biggest TTS
-  // latency win for long utterances (a 3-chunk turn starts ~2× faster).
-  // Intl target: ElevenLabs returns a single mp3 so there's nothing to pipeline.
   step('tts', 'Generating voice…');
   let firstAudioAt = 0;
+  const markFirstAudio = () => {
+    if (!firstAudioAt) { firstAudioAt = Date.now(); step('playing', 'Playing…'); }
+  };
 
   const audioPromise = (async () => {
+    let playChain = Promise.resolve();
     if (tgtIndian) {
-      const playQueue = [];
-      let playChain = Promise.resolve();
+      // Bulbul: textToSpeech yields per-chunk b64 via onChunk. Chunk 1 plays
+      // while chunk 2 is still on the wire.
+      const queued = [];
       const enqueue = (b64) => {
-        if (!firstAudioAt) { firstAudioAt = Date.now(); step('playing', 'Playing…'); }
+        markFirstAudio();
         playChain = playChain.then(() => playBase64Audio(b64, { sinkId }));
-        playQueue.push(playChain);
+        queued.push(playChain);
       };
       await textToSpeech({
         text: translatedText,
@@ -113,11 +105,23 @@ export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGe
         speaker: SARVAM_VOICE[voiceGender],
         onChunk: enqueue,
       });
-      await Promise.all(playQueue);
+      await Promise.all(queued);
     } else {
-      const b64 = await elevenLabsTTS({ text: translatedText, voiceGender });
-      step('playing', 'Playing…');
-      if (b64) await playBase64Audio(b64, { sinkId });
+      // OpenAI TTS-1 is single-shot per call — split the text into a fast
+      // first chunk + remainder, fire both in parallel, play in order.
+      const pieces = splitForFastFirstChunk(translatedText);
+      const promises = pieces.map((p) => openaiTTS({ text: p, voiceGender }));
+      const queued = [];
+      for (const p of promises) {
+        const b64Promise = p; // capture
+        playChain = playChain.then(async () => {
+          const b64 = await b64Promise;
+          markFirstAudio();
+          if (b64) await playBase64Audio(b64, { sinkId });
+        });
+        queued.push(playChain);
+      }
+      await Promise.all(queued);
     }
     step('done', '');
   })();

@@ -10,6 +10,10 @@
  */
 
 import { arrayBufferToBase64 } from './openai.js';
+import { authedFetch } from '../lib/authed-fetch.js';
+
+const useApi = !import.meta.env.DEV || import.meta.env.VITE_USE_API === '1';
+const doFetch = (url, opts) => (useApi ? authedFetch(url, opts) : fetch(url, opts));
 
 const VOICE_IDS = {
   male:   'onwK4e9ZLuTAKqWW03F9', // Daniel — neutral, multilingual
@@ -19,16 +23,15 @@ const VOICE_IDS = {
 export async function elevenLabsTTS({ text, voiceGender = 'male', apiKey }) {
   const voiceId = VOICE_IDS[voiceGender] || VOICE_IDS.male;
 
-  // Dev: Vite proxies /elevenlabs → https://api.elevenlabs.io
-  // Prod: Vercel serverless at /api/elevenlabs-tts?voiceId=...
-  const url = import.meta.env.DEV
-    ? `/elevenlabs/v1/text-to-speech/${voiceId}`
-    : `/api/elevenlabs-tts?voiceId=${voiceId}`;
+  // useApi → /api/elevenlabs-tts (auth + logging); else Vite proxy direct.
+  const url = useApi
+    ? `/api/elevenlabs-tts?voiceId=${voiceId}`
+    : `/elevenlabs/v1/text-to-speech/${voiceId}`;
 
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['xi-api-key'] = apiKey;
 
-  const res = await fetch(url, {
+  const res = await doFetch(url, {
     method: 'POST',
     headers,
     body: JSON.stringify({
