@@ -4,6 +4,7 @@
 //   - AudioContext is created from the passed-in MediaStream source (tab or mic).
 //   - Runs inside the offscreen document, which behaves like a normal page.
 import { API_BASE } from '../config.js';
+import { authedFetch } from '../auth.js';
 
 const WORKLET_SRC = `
 class PCMProcessor extends AudioWorkletProcessor {
@@ -26,7 +27,7 @@ const WS_URL = 'wss://api.sarvam.ai/speech-to-text/streaming';
 let _cachedKey = null;
 async function getKey() {
   if (_cachedKey) return _cachedKey;
-  const res = await fetch(`${API_BASE}/sarvam-ws-key`);
+  const res = await authedFetch(`${API_BASE}/sarvam-ws-key`);
   if (!res.ok) throw new Error(`Streaming STT key fetch failed (${res.status})`);
   const data = await res.json();
   _cachedKey = data.key || '';

@@ -12,5 +12,8 @@
         { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization, api-subscription-key, xi-api-key" }
       ]
     }
+  ],
+  "rewrites": [
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
 }

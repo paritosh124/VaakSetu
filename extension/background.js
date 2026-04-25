@@ -4,8 +4,42 @@
 // Because MV3 service workers cannot hold MediaStreams, all audio
 // capture + pipeline work happens in the offscreen document.
 
+import { setSession, signOut as authSignOut } from './lib/auth.js';
+
 const OFFSCREEN_URL = chrome.runtime.getURL('offscreen/offscreen.html');
 let activeTabId = null;
+
+// ─── External messages (from the webapp's connect-extension page) ───────────
+// The webapp at vaak-setu.vercel.app sends us the user's Supabase session
+// once they hit "Connect Extension". Origin is enforced by the
+// externally_connectable.matches list in manifest.json.
+chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
+  (async () => {
+    try {
+      if (msg?.type === 'auth-set-session' && msg.session) {
+        await setSession(msg.session);
+        // Notify popup if it's open so it can re-render.
+        try { chrome.runtime.sendMessage({ event: 'auth-changed' }); } catch {}
+        sendResponse({ ok: true });
+        return;
+      }
+      if (msg?.type === 'auth-sign-out') {
+        await authSignOut();
+        try { chrome.runtime.sendMessage({ event: 'auth-changed' }); } catch {}
+        sendResponse({ ok: true });
+        return;
+      }
+      if (msg?.type === 'auth-ping') {
+        sendResponse({ ok: true, version: chrome.runtime.getManifest().version });
+        return;
+      }
+      sendResponse({ error: 'unknown external message' });
+    } catch (err) {
+      sendResponse({ error: err?.message || String(err) });
+    }
+  })();
+  return true;
+});
 
 async function hasOffscreen() {
   const contexts = await chrome.runtime.getContexts({

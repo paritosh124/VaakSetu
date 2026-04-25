@@ -1,6 +1,8 @@
 // Sarvam API wrapper for the Chrome extension.
-// Always hits the deployed Vercel serverless proxy — no browser-side API key.
+// Always hits the deployed Vercel serverless proxy with the user's JWT
+// attached — proxy validates auth and writes a usage_events row.
 import { API_BASE } from '../config.js';
+import { authedFetch } from '../auth.js';
 
 const toSTTCode    = (c) => c === 'od-IN' ? 'or-IN' : c;
 const toNonSTTCode = (c) => c === 'or-IN' ? 'od-IN' : c;
@@ -13,7 +15,7 @@ export async function speechToText({ audioBlob, languageCode, mode = 'transcribe
   fd.append('mode', mode);
   fd.append('language_code', toSTTCode(languageCode));
 
-  const res = await fetch(`${API_BASE}/speech-to-text`, { method: 'POST', body: fd });
+  const res = await authedFetch(`${API_BASE}/speech-to-text`, { method: 'POST', body: fd });
   if (!res.ok) throw new Error(`Sarvam STT failed (${res.status}): ${await res.text().catch(() => res.statusText)}`);
 
   const data = await res.json();
@@ -26,7 +28,7 @@ export async function speechToText({ audioBlob, languageCode, mode = 'transcribe
 const MAX_TRANSLATE_CHARS = 900;
 
 async function translateOne({ text, sourceLang, targetLang }) {
-  const res = await fetch(`${API_BASE}/translate`, {
+  const res = await authedFetch(`${API_BASE}/translate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -97,7 +99,7 @@ function chunkText(text, maxLen = MAX_TTS_CHARS) {
 }
 
 async function ttsChunk({ chunk, languageCode, speaker }) {
-  const res = await fetch(`${API_BASE}/text-to-speech`, {
+  const res = await authedFetch(`${API_BASE}/text-to-speech`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

@@ -3,6 +3,7 @@
 // ($15/1M chars vs $180/1M chars) with comparable quality on Spanish for
 // our use case. Returns base64 mp3, same shape as elevenLabsTTS.
 import { API_BASE } from '../config.js';
+import { authedFetch } from '../auth.js';
 
 // Maps our generic voice gender to OpenAI TTS voices.
 const VOICES = {
@@ -12,7 +13,7 @@ const VOICES = {
 
 export async function openaiTTS({ text, voiceGender = 'male' }) {
   const voice = VOICES[voiceGender] || VOICES.male;
-  const res = await fetch(`${API_BASE}/openai-tts`, {
+  const res = await authedFetch(`${API_BASE}/openai-tts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

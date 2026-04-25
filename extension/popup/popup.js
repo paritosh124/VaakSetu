@@ -1,5 +1,9 @@
 import { PICKER_INDIAN_LANGS as INDIAN_LANGS, PICKER_INTL_LANGS as INTL_LANGS } from '../lib/config.js';
+import { getProfileInfo, signOut } from '../lib/auth.js';
 
+const CONNECT_URL = 'https://vaak-setu.vercel.app/connect-extension';
+
+const authPanelEl    = document.getElementById('authPanel');
 const agentLangEl    = document.getElementById('agentLang');
 const customerLangEl = document.getElementById('customerLang');
 const agentVoiceEl   = document.getElementById('agentVoice');
@@ -55,7 +59,54 @@ async function fillDevices(selectEl, kind, selected) {
   }
 }
 
+async function renderAuthPanel() {
+  const profile = await getProfileInfo();
+  if (profile) {
+    authPanelEl.innerHTML = `
+      <div class="signed-in">
+        <span class="signed-in-email" title="${profile.email}">${profile.email}</span>
+        ${profile.role === 'admin' ? '<span class="signed-in-role">admin</span>' : ''}
+        <button class="auth-btn" id="signOutBtn">Sign out</button>
+      </div>
+    `;
+    authPanelEl.querySelector('#signOutBtn').addEventListener('click', async () => {
+      await signOut();
+      await renderAuthPanel();
+      updateToggleAvailability();
+    });
+  } else {
+    authPanelEl.innerHTML = `
+      <p class="signed-out-msg">Sign in to use VaakSetu. Usage and translations are tied to your account.</p>
+      <button class="signin-btn" id="signInBtn">Sign in to VaakSetu</button>
+    `;
+    authPanelEl.querySelector('#signInBtn').addEventListener('click', () => {
+      chrome.tabs.create({ url: CONNECT_URL });
+    });
+  }
+  updateToggleAvailability();
+}
+
+async function updateToggleAvailability() {
+  const profile = await getProfileInfo();
+  if (!profile) {
+    toggleBtn.disabled = true;
+    toggleBtn.title = 'Sign in to use VaakSetu';
+  } else {
+    toggleBtn.disabled = false;
+    toggleBtn.title = '';
+  }
+}
+
+// The background relays an `auth-changed` message after the connect-extension
+// page hands us a session. Re-render the panel so the user sees their email
+// without having to close+reopen the popup.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.event === 'auth-changed') renderAuthPanel();
+});
+
 async function init() {
+  await renderAuthPanel();
+
   const saved = await chrome.storage.local.get([
     'agentLang','customerLang','agentVoice','customerVoice',
     'micDeviceId','sinkAgent','sinkCustomer','outputSinkId','running',
@@ -119,6 +170,13 @@ async function openPermissionTab(tabId) {
 
 async function onToggle() {
   toggleBtn.disabled = true;
+  const profile = await getProfileInfo();
+  if (!profile) {
+    statusLine.textContent = 'Please sign in first.';
+    statusLine.classList.add('error');
+    toggleBtn.disabled = false;
+    return;
+  }
   const { running } = await chrome.storage.local.get('running');
 
   try {

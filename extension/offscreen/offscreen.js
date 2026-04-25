@@ -58,6 +58,18 @@ function post(ev, extra = {}) {
   chrome.runtime.sendMessage({ to: 'widget', tabId: config.tabId, event: ev, ...extra }).catch(() => {});
 }
 
+// Translate raw error messages into something the widget user can act on.
+function friendlyError(err) {
+  const msg = err?.message || String(err) || 'Unknown error';
+  if (msg === 'NOT_SIGNED_IN' || msg.includes('NOT_SIGNED_IN')) {
+    return 'Signed out. Open the VaakSetu popup and sign in again.';
+  }
+  if (msg.includes('401') || msg.toLowerCase().includes('unauthorized')) {
+    return 'Session expired. Open the popup and sign in again.';
+  }
+  return msg;
+}
+
 async function ensureTabStream(streamId) {
   if (tabStream) return tabStream;
   // getUserMedia with chromeMediaSource:'tab' captures the tab audio without
@@ -216,7 +228,7 @@ async function runBatchTurn({ who, blob }) {
     console.log(`[vaaksetu timing ${who}] READY +${tReady}ms | PLAYED +${Date.now() - t0}ms`);
     post('status', { text: '' });
   } catch (err) {
-    post('error', { error: err.message || String(err) });
+    post('error', { error: friendlyError(err) });
   }
 }
 
@@ -561,7 +573,7 @@ async function runTurn({ cap, pivotText, blob, endedAt }) {
     await result.audioPromise;
     console.log(`[vaaksetu timing ${who}] READY +${tReady}ms | PLAYED +${Date.now() - endedAt}ms`);
   } catch (err) {
-    post('error', { error: err.message || String(err) });
+    post('error', { error: friendlyError(err) });
   } finally {
     // Lock released only AFTER playback completes — the listener has heard
     // the message before the other side's VAD can grab the floor.

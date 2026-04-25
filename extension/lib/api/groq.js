@@ -1,5 +1,6 @@
 // Groq wrapper for extension — transcribe + Llama translate.
 import { API_BASE } from '../config.js';
+import { authedFetch } from '../auth.js';
 
 async function groqTranscribe({ audioBlob, sourceLang }) {
   const fd = new FormData();
@@ -9,7 +10,7 @@ async function groqTranscribe({ audioBlob, sourceLang }) {
   fd.append('response_format', 'json');
   if (sourceLang) fd.append('language', sourceLang.split('-')[0]); // ISO-639-1
 
-  const res = await fetch(`${API_BASE}/groq-stt-translate`, { method: 'POST', body: fd });
+  const res = await authedFetch(`${API_BASE}/groq-stt-translate`, { method: 'POST', body: fd });
   if (!res.ok) throw new Error(`Groq STT failed (${res.status}): ${await res.text().catch(() => res.statusText)}`);
   const data = await res.json();
   return data.text || '';
@@ -23,7 +24,7 @@ export async function groqSpeechToEnglish({ audioBlob, sourceLang }) {
 }
 
 export async function groqTranslate({ text, targetLangName }) {
-  const res = await fetch(`${API_BASE}/groq-chat`, {
+  const res = await authedFetch(`${API_BASE}/groq-chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
