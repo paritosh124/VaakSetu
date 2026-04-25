@@ -90,13 +90,25 @@ export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGe
 
   const audioPromise = (async () => {
     let playChain = Promise.resolve();
+    let totalChunks = 0;
+    let totalBytes = 0;
+    const playOne = async (b64) => {
+      if (!b64) { console.warn('[vaaksetu tts] empty audio chunk — skipping'); return; }
+      totalChunks++;
+      totalBytes += b64.length;
+      console.log(`[vaaksetu tts] playing chunk ${totalChunks}, b64 len=${b64.length}, sinkId=${sinkId || 'default'}`);
+      try {
+        await playBase64Audio(b64, { sinkId });
+      } catch (err) {
+        console.error('[vaaksetu tts] playBase64Audio failed:', err?.message, err);
+        throw err;
+      }
+    };
     if (tgtIndian) {
-      // Bulbul: textToSpeech yields per-chunk b64 via onChunk. Chunk 1 plays
-      // while chunk 2 is still on the wire.
       const queued = [];
       const enqueue = (b64) => {
         markFirstAudio();
-        playChain = playChain.then(() => playBase64Audio(b64, { sinkId }));
+        playChain = playChain.then(() => playOne(b64));
         queued.push(playChain);
       };
       await textToSpeech({
@@ -107,22 +119,22 @@ export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGe
       });
       await Promise.all(queued);
     } else {
-      // OpenAI TTS-1 is single-shot per call — split the text into a fast
-      // first chunk + remainder, fire both in parallel, play in order.
       const pieces = splitForFastFirstChunk(translatedText);
+      console.log(`[vaaksetu tts] intl pieces:`, pieces.length, pieces.map((p) => p.length));
       const promises = pieces.map((p) => openaiTTS({ text: p, voiceGender }));
       const queued = [];
       for (const p of promises) {
-        const b64Promise = p; // capture
+        const b64Promise = p;
         playChain = playChain.then(async () => {
           const b64 = await b64Promise;
           markFirstAudio();
-          if (b64) await playBase64Audio(b64, { sinkId });
+          await playOne(b64);
         });
         queued.push(playChain);
       }
       await Promise.all(queued);
     }
+    console.log(`[vaaksetu tts] done — ${totalChunks} chunk(s), ${totalBytes} total bytes`);
     step('done', '');
   })();
   return { pivotText, translatedText, audioPromise };

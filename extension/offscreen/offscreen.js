@@ -12,7 +12,12 @@
 // agent hears only translated audio, never the raw customer voice.
 import { translateAudio, pivotToSpeech, playBase64Audio } from '../lib/pipeline.js';
 import { getLang, isIndianLang } from '../lib/config.js';
-import { SarvamStreamingSTT, supportsStreamingSTT } from '../lib/api/sarvam-streaming.js';
+
+// NOTE: streaming STT is intentionally disabled for now. WebSocket handshake
+// has been unreliable in our test envs (code 1006 closes before open) and
+// turn-based Go Live with batch STT is what we're optimizing right now. To
+// re-enable, restore the SarvamStreamingSTT import + the cap.streamer block
+// in beginCapture, and the await streamer.stop() in endCapture.
 
 let config = null;
 let tabStream = null;
@@ -378,10 +383,6 @@ function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd, onNoSignal }) 
 
 async function startGoLive() {
   if (goLive) return;
-  if (!supportsStreamingSTT()) {
-    post('error', { error: 'Streaming STT not supported in this browser.' });
-    return;
-  }
   try {
     await ensureTabStream(config?.streamId);
     await ensureMicStream();
@@ -491,22 +492,8 @@ async function beginCapture(who) {
     post('error', { error: `Recorder failed: ${err.message}` });
   }
 
-  // Whole-utterance streaming STT (Indian source only). The listener won't
-  // hear sentence-by-sentence — they hear the full translation once the
-  // speaker stops. Predictable, no speaker confusion.
-  if (isIndianLang(sourceLang)) {
-    const mode = sourceLang === 'en-IN' ? 'transcribe' : 'translate';
-    cap.streamer = new SarvamStreamingSTT({
-      languageCode: sourceLang, mode,
-      onPartial: (text) => post('partial', { who, text }),
-    });
-    try {
-      await cap.streamer.start(stream);
-    } catch (err) {
-      cap.streamer = null;
-      console.warn('[offscreen] streaming STT start failed, will use batch:', err.message);
-    }
-  }
+  // Streaming STT disabled — endCapture will run the full batch pipeline
+  // off the MediaRecorder blob.
 }
 
 async function endCapture(who) {
@@ -515,19 +502,9 @@ async function endCapture(who) {
   activeCapture = null;
 
   const endedAt = Date.now();
+  const pivotText = ''; // batch-only path: pivot comes from the STT API call
 
-  // Pull the streaming pivot (returns last partial almost instantly under the
-  // fast-path stop()).
-  let pivotText = '';
-  if (cap.streamer) {
-    const tStop = Date.now();
-    try { pivotText = (await cap.streamer.stop()) || ''; }
-    catch (e) { console.warn('[offscreen] streamer.stop failed', e?.message); }
-    console.log(`[vaaksetu timing ${who}] streamer.stop took ${Date.now() - tStop}ms; pivot=${JSON.stringify(pivotText.slice(0, 80))}`);
-  }
-
-  // Pull the recorder blob — used as the batch fallback when streaming
-  // produced nothing or the source is intl.
+  // Pull the recorder blob — fed into translateAudio for full batch pipeline.
   let blob = null;
   try {
     if (cap.mediaRecorder && cap.mediaRecorder.state !== 'inactive') cap.mediaRecorder.stop();
