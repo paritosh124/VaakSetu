@@ -18,14 +18,16 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
     try {
       if (msg?.type === 'auth-set-session' && msg.session) {
         await setSession(msg.session);
-        // Notify popup if it's open so it can re-render.
-        try { chrome.runtime.sendMessage({ event: 'auth-changed' }); } catch {}
+        // Best-effort: tell the popup to re-render. If it's not open, the
+        // sendMessage rejects with "Could not establish connection." — we
+        // explicitly swallow that, it's expected.
+        chrome.runtime.sendMessage({ event: 'auth-changed' }).catch(() => {});
         sendResponse({ ok: true });
         return;
       }
       if (msg?.type === 'auth-sign-out') {
         await authSignOut();
-        try { chrome.runtime.sendMessage({ event: 'auth-changed' }); } catch {}
+        chrome.runtime.sendMessage({ event: 'auth-changed' }).catch(() => {});
         sendResponse({ ok: true });
         return;
       }

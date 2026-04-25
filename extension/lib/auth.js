@@ -20,19 +20,33 @@
 
 const STORAGE_KEY = 'vaaksetu_session';
 
-// Read once at module load — do NOT cache forever. Use refreshIfNeeded()
-// before any API call that requires auth.
+// Defensive guard: if chrome.storage isn't available (e.g. module is being
+// loaded outside an extension context, or during a service-worker boot that
+// hasn't finished setup), fail clean with a clear message instead of
+// "cannot read properties of undefined".
+function storage() {
+  if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) {
+    throw new Error('chrome.storage.local unavailable in this context');
+  }
+  return chrome.storage.local;
+}
+
 async function loadSession() {
-  const result = await chrome.storage.local.get(STORAGE_KEY);
-  return result[STORAGE_KEY] || null;
+  try {
+    const result = await storage().get(STORAGE_KEY);
+    return result[STORAGE_KEY] || null;
+  } catch (err) {
+    console.warn('[vaaksetu auth] loadSession failed:', err.message);
+    return null;
+  }
 }
 
 async function saveSession(session) {
-  await chrome.storage.local.set({ [STORAGE_KEY]: session });
+  await storage().set({ [STORAGE_KEY]: session });
 }
 
 async function clearSession() {
-  await chrome.storage.local.remove(STORAGE_KEY);
+  try { await storage().remove(STORAGE_KEY); } catch {}
 }
 
 // Discovers the Supabase URL the extension should refresh tokens against.
