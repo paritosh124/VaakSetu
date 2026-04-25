@@ -521,9 +521,21 @@ async function runTurn({ cap, pivotText, blob, endedAt }) {
 
   post('status', { text: `● Translating ${who === 'agent' ? 'your' : "customer's"} speech…` });
 
-  const latencyStep = (msg) =>
-    console.log(`[vaaksetu timing ${who}] +${Date.now() - endedAt}ms ${msg}`);
-  const onStep = (_id, msg) => { latencyStep(msg); };
+  // Step-duration logger. Each call closes out the prior step and opens the
+  // new one, so the printed line is "<prior step> took X ms".
+  let lastStepAt = endedAt;
+  let lastStepName = null;
+  const stepDurations = [];
+  const closeStep = (msg = null) => {
+    if (lastStepName) {
+      const dur = Date.now() - lastStepAt;
+      stepDurations.push({ step: lastStepName, ms: dur });
+      console.log(`[vaaksetu timing ${who}] ${lastStepName.padEnd(10)} took ${String(dur).padStart(5)} ms (cumulative +${Date.now() - endedAt}ms)`);
+    }
+    lastStepAt = Date.now();
+    lastStepName = msg;
+  };
+  const onStep = (id, _msg) => closeStep(id);
   const onText = (pivot, translated) => {
     console.log(`[vaaksetu text ${who}] pivot (${sourceLang}): ${JSON.stringify(pivot)}`);
     console.log(`[vaaksetu text ${who}] final (${targetLang}): ${JSON.stringify(translated)}`);
@@ -533,7 +545,8 @@ async function runTurn({ cap, pivotText, blob, endedAt }) {
   try {
     let result;
     if (pivotText) {
-      latencyStep('STT done (streaming)');
+      console.log(`[vaaksetu timing ${who}] STT done (streaming) at +${Date.now() - endedAt}ms — skipping batch STT`);
+      lastStepAt = Date.now();
       result = await pivotToSpeech({
         pivotText, sourceLang, targetLang, voiceGender,
         sinkId: sinkFor(who), onStep, onText,
@@ -549,9 +562,12 @@ async function runTurn({ cap, pivotText, blob, endedAt }) {
     }
 
     const tReady = Date.now() - endedAt;
+    closeStep('tts'); // close out 'tts' step at moment of READY (first audio enqueued)
     post('status', { text: `● Playing translation…` });
     await result.audioPromise;
-    console.log(`[vaaksetu timing ${who}] READY +${tReady}ms | PLAYED +${Date.now() - endedAt}ms`);
+    closeStep('playing');
+    const breakdown = stepDurations.map((s) => `${s.step}=${s.ms}ms`).join(' ');
+    console.log(`[vaaksetu timing ${who}] SUMMARY READY +${tReady}ms | PLAYED +${Date.now() - endedAt}ms | ${breakdown}`);
   } catch (err) {
     post('error', { error: friendlyError(err) });
   } finally {
