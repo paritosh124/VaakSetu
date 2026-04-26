@@ -40,11 +40,10 @@ export const INTL_LANGS = [
 
 export const ALL_LANGS = [...INDIAN_LANGS, ...INTL_LANGS];
 
-// MVP picker only exposes two pairs while we optimize latency / cost. Full
-// catalogs above stay intact so routing helpers (isIndianLang etc.) still
-// resolve codes correctly when more pairs come back.
-export const PICKER_INDIAN_LANGS = INDIAN_LANGS.filter((l) => ['en-IN', 'hi-IN'].includes(l.code));
-export const PICKER_INTL_LANGS   = INTL_LANGS.filter((l) => ['es'].includes(l.code));
+// Full catalogs. Earlier we trimmed these to two pairs while optimizing
+// latency / cost — restored to the complete sets now.
+export const PICKER_INDIAN_LANGS = INDIAN_LANGS;
+export const PICKER_INTL_LANGS   = INTL_LANGS;
 
 export function isIndianLang(code) {
   return INDIAN_LANGS.some((l) => l.code === code);

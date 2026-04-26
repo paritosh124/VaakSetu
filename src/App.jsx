@@ -50,12 +50,10 @@ const INTL_LANGUAGES = [
 const INDIAN_CODES = new Set(LANGUAGES.map((l) => l.code));
 const isIndianLang = (code) => INDIAN_CODES.has(code);
 
-// MVP picker is restricted to two pairs while we optimize latency / cost.
-// LANGUAGES + INTL_LANGUAGES above stay as the full catalogs for getLang()
-// and routing helpers, so saved preferences from earlier versions still
-// resolve cleanly.
-const PICKER_LANGUAGES      = LANGUAGES.filter((l) => ['en-IN', 'hi-IN'].includes(l.code));
-const PICKER_INTL_LANGUAGES = INTL_LANGUAGES.filter((l) => ['es'].includes(l.code));
+// Full catalogs. Earlier we trimmed these to two pairs while optimizing
+// latency / cost — restored to the complete sets now.
+const PICKER_LANGUAGES      = LANGUAGES;
+const PICKER_INTL_LANGUAGES = INTL_LANGUAGES;
 
 // Bulbul v3 voices (Sarvam) — also used as gender key for OpenAI (onyx/nova)
 const VOICES = {
