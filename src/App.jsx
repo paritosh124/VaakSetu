@@ -367,6 +367,9 @@ export default function App() {
               apiKey,
               onStep,
               onText,
+              // In hands-free Go Live, use streaming Bulbul for ~200-500ms
+              // first-audio latency vs ~1-3s on the batch endpoint.
+              streamTTS: autoConvRef.current,
             });
       setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, audioB64: result.audioB64 } : m));
 

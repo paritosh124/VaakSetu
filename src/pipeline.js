@@ -8,6 +8,7 @@
  */
 
 import { speechToText, translateText, textToSpeech, playBase64Audio } from './api/sarvam.js';
+import { streamingTextToSpeech, streamingTTSSupported } from './api/sarvam-tts-stream.js';
 import { openaiSpeechToEnglish, openaiSpeechToText, openaiTranslate, openaiTTS } from './api/openai.js';
 import { groqSpeechToEnglish, groqTranslate, browserTTS } from './api/groq.js';
 import { elevenLabsTTS } from './api/elevenlabs.js';
@@ -28,7 +29,7 @@ export async function speechToEnglish({ audioBlob, sourceLang, apiKey, onStep })
  * Receiver half — used in remote (two-phone) mode.
  * English pivot text → TTS in my language with my voice.
  */
-export async function englishToSpeech({ pivotText, targetLang, voice, apiKey, onStep, onText }) {
+export async function englishToSpeech({ pivotText, targetLang, voice, apiKey, onStep, onText, streamTTS = false }) {
   const isTargetEnglish = targetLang === 'en-IN';
   let translatedText = pivotText;
 
@@ -40,6 +41,24 @@ export async function englishToSpeech({ pivotText, targetLang, voice, apiKey, on
   onText?.(pivotText, translatedText);
 
   onStep?.('tts', 'Generating voice…');
+
+  // Streaming Bulbul: ~200-500ms to first audio vs ~1-3s for batch.
+  // Used in Go Live / hands-free; PTT keeps the simpler batch path.
+  if (streamTTS && streamingTTSSupported()) {
+    try {
+      onStep?.('playing', 'Playing…');
+      const audioPromise = streamingTextToSpeech({
+        text: translatedText,
+        languageCode: targetLang,
+        speaker: voice || 'anand',
+        apiKey,
+      }).then(() => onStep?.('done', ''));
+      return { pivotText, translatedText, audioB64: [], audioPromise };
+    } catch (err) {
+      console.warn('[pipeline] streaming TTS failed, falling back to batch:', err?.message);
+    }
+  }
+
   const audioB64 = await textToSpeech({ text: translatedText, languageCode: targetLang, speaker: voice || 'anand', apiKey });
 
   onStep?.('playing', 'Playing…');

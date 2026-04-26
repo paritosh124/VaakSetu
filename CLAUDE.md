@@ -756,6 +756,18 @@ No new server-side keys beyond what the webapp uses. The extension's
 - **Intl TTS swapped from ElevenLabs to OpenAI TTS-1** in the extension. ~12× cheaper ($15/1M chars vs $180) for comparable Spanish quality. ElevenLabs file kept as dead code; can swap back via a one-line import change.
 - **MVP picker trim**: extension popup and webapp solo-mode dropdowns expose only `en-IN`/`hi-IN` (Indic) and `es` (Intl). Full language catalogs preserved internally for routing + saved-preference resolution.
 - **VAD `SILENCE_MS` 900 → 700ms** in offscreen. Down to 700 was reliable in fixture testing without false-stops on natural pauses.
+- **Streaming Bulbul TTS** (Go Live / hands-free only): new server proxy at
+  `/api/text-to-speech-stream` pipes Sarvam's streamed audio body back to the
+  client without buffering. Client uses MediaSource + `<audio>` element to
+  play chunks as they arrive — first audio at ~200-500ms vs ~1-3s for batch
+  Bulbul on the same utterance. PTT stays on the batch endpoint by design
+  (push-to-talk users expect playback only after they release the button).
+  Wired via a `streamTTS` flag on `pivotToSpeech` (extension) and
+  `englishToSpeech` (webapp); offscreen Go Live and webapp two-phone Go Live
+  pass `true`. Falls back to batch automatically if MediaSource isn't
+  supported or the streaming endpoint errors. New files:
+  `extension/lib/api/sarvam-tts-stream.js`, `src/api/sarvam-tts-stream.js`,
+  `api/text-to-speech-stream.js`.
 - **Extension auth wired**. Webapp at `/connect-extension` (new path-routed React page) hands the user's Supabase session to the extension via `chrome.runtime.sendMessage(EXTENSION_ID, …)` — secured by `externally_connectable.matches: ["https://vaak-setu.vercel.app/*"]` in `manifest.json`. Extension stores the session in `chrome.storage.local` (custom adapter in `extension/lib/auth.js`), refreshes the access token on demand via Supabase's `/auth/v1/token` endpoint when within 60s of expiry, and `authedFetch` in the same module attaches `Authorization: Bearer …` to every `/api/*` call. Popup shows "signed in as X / sign out", blocks "Start translator" until signed in. Required env on Vercel: `VITE_EXTENSION_ID` (the extension's chrome://extensions ID).
 - **New `pivotToAudio` pipeline variant** (extension + webapp): identical to `pivotToSpeech` but returns `{ audios }` without auto-playing, so multiple sentences can translate + TTS in parallel while the caller keeps audio in order.
 - **Webapp solo Go Live (auto-detect)**: new button in single-device mode uses `SarvamSentenceStreamer` with `language_code: 'unknown'` + `mode: 'transcribe'`, routes sentences by script (Devanagari vs Latin) to the OTHER configured language, translates source→target directly (no English pivot hop), and pipelines Bulbul chunks into a shared playback chain. Each sentence lands in the ear as it's detected — no wait for the speaker to pause.

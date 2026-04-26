@@ -581,11 +581,13 @@ async function runTurn({ cap, pivotText, blob, endedAt }) {
       result = await pivotToSpeech({
         pivotText, sourceLang, targetLang, voiceGender,
         sinkId: sinkFor(who), onStep, onText,
+        streamTTS: true,           // Go Live → streaming Bulbul
       });
     } else if (blob && blob.size >= 1000) {
       result = await translateAudio({
         audioBlob: blob, sourceLang, targetLang, voiceGender,
         sinkId: sinkFor(who), onStep, onText,
+        streamTTS: true,           // Go Live → streaming Bulbul
       });
     } else {
       post('status', { text: 'Too short — keep speaking.' });

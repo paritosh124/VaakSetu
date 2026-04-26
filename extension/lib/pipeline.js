@@ -12,6 +12,7 @@
 //              target intl     → OpenAI TTS-1     (~12× cheaper than ElevenLabs
 //                                                  for comparable Spanish quality)
 import { speechToText, translateText, textToSpeech, playBase64Audio } from './api/sarvam.js';
+import { streamingTextToSpeech, streamingTTSSupported } from './api/sarvam-tts-stream.js';
 import { groqSpeechToEnglish, groqTranslate } from './api/groq.js';
 import { openaiTTS } from './api/openai.js';
 import { isIndianLang, getLang } from './config.js';
@@ -45,7 +46,9 @@ function splitForFastFirstChunk(text) {
 export { playBase64Audio };
 
 // Batch path (push-to-talk): audio blob in, full pipeline.
-export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceGender = 'male', sinkId, onStep, onText }) {
+// `streamTTS` is forwarded to pivotToSpeech — Go Live in offscreen sets it
+// true; PTT defaults false.
+export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceGender = 'male', sinkId, onStep, onText, streamTTS = false }) {
   const step = (id, msg) => onStep?.(id, msg);
   const srcIndian = isIndianLang(sourceLang);
 
@@ -63,11 +66,15 @@ export async function translateAudio({ audioBlob, sourceLang, targetLang, voiceG
     pivotText = await groqSpeechToEnglish({ audioBlob, sourceLang });
   }
 
-  return pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGender, sinkId, onStep, onText });
+  return pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGender, sinkId, onStep, onText, streamTTS });
 }
 
 // Streaming path (Go Live): pivot already produced by Sarvam streaming STT.
-export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGender = 'male', sinkId, onStep, onText }) {
+// `streamTTS: true` switches Indic targets from batch Bulbul (full-utterance
+// generation, ~1-3s before first audio) to streaming Bulbul over MediaSource
+// (~200-500ms before first audio). Recommended for hands-free / Go Live;
+// PTT keeps the simpler batch path.
+export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGender = 'male', sinkId, onStep, onText, streamTTS = false }) {
   const step = (id, msg) => onStep?.(id, msg);
   const tgtIndian = isIndianLang(targetLang);
   const isTgtEnglish = targetLang === 'en-IN' || targetLang === 'en';
@@ -105,6 +112,26 @@ export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGe
       }
     };
     if (tgtIndian) {
+      // Streaming mode: SourceBuffer feeds chunks as they arrive.
+      if (streamTTS && streamingTTSSupported()) {
+        try {
+          await streamingTextToSpeech({
+            text: translatedText,
+            languageCode: targetLang,
+            speaker: SARVAM_VOICE[voiceGender],
+            sinkId,
+            onFirstAudio: () => markFirstAudio(),
+          });
+          totalChunks = 1; totalBytes = translatedText.length;
+          console.log(`[vaaksetu tts] done — streamed`);
+          step('done', '');
+          return;
+        } catch (err) {
+          console.warn('[vaaksetu tts] streaming failed, falling back to batch:', err?.message);
+        }
+      }
+      // Batch path (or streaming fallback): per-chunk Bulbul calls played
+      // sequentially, with chunk N+1 generating while chunk N plays.
       const queued = [];
       const enqueue = (b64) => {
         markFirstAudio();
