@@ -285,7 +285,7 @@ async function runBatchTurn({ who, blob }) {
 // sustained, which was triggering Saaras to hallucinate "yes yes yes…" on
 // effective silence. 14 is well above ambient but still well below normal
 // speech (~30-60 RMS at conversational distance).
-const SILENCE_THRESHOLD = 8;  // batch STT only — no streaming hallucination risk
+const SILENCE_THRESHOLD = 6;  // applied after 8× gain boost; effective mic threshold ≈ 0.75 raw RMS
 const SILENCE_MS = 700;            // dropped from 900 → faster turn end
 const MIN_SPEECH_MS = 400;          // bump 320 → 400 to reject brief noise blips
 const GAP_TOLERANCE_MS = 250;
@@ -300,12 +300,17 @@ function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd, onNoSignal }) 
   const src = ac.createMediaStreamSource(stream);
   const analyser = ac.createAnalyser();
   analyser.fftSize = 512;
+  // Boost gain before the analyser so AGC-compressed mic signals (peakRms ~0.5-2)
+  // are amplified to a detectable range. MediaRecorder captures directly from the
+  // stream, so this only affects VAD measurement, not the recorded audio.
+  const boost = ac.createGain();
+  boost.gain.value = 8;
   // Terminate graph into a muted gain → destination. Some Chromium builds
-  // prune subgraphs that don't reach destination, which would freeze the
-  // analyser data.
+  // prune subgraphs that don't reach destination, which would freeze the analyser.
   const mute = ac.createGain();
   mute.gain.value = 0;
-  src.connect(analyser);
+  src.connect(boost);
+  boost.connect(analyser);
   analyser.connect(mute);
   mute.connect(ac.destination);
 
@@ -380,6 +385,7 @@ function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd, onNoSignal }) 
     stop() {
       clearInterval(interval);
       try { src.disconnect(); } catch {}
+      try { boost.disconnect(); } catch {}
       try { analyser.disconnect(); } catch {}
       try { mute.disconnect(); } catch {}
       try { ac.close(); } catch {}
