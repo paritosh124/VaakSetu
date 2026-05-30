@@ -157,10 +157,13 @@ export async function signOut() {
   await clearSession();
 }
 
-// Plain fetch wrapper that attaches Authorization automatically. Throws if
-// the user isn't signed in — callers should handle and surface a helpful
-// message ("Sign in to VaakSetu first").
+// Plain fetch wrapper that attaches Authorization automatically.
+// When AUTH_ENABLED is false, falls through to plain fetch so the extension
+// works without a Supabase session.
+import { AUTH_ENABLED } from './config.js';
+
 export async function authedFetch(url, options = {}) {
+  if (!AUTH_ENABLED) return fetch(url, options);
   const token = await getAccessToken();
   if (!token) throw new Error('NOT_SIGNED_IN');
   const headers = { ...(options.headers || {}), Authorization: `Bearer ${token}` };

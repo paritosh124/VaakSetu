@@ -1,4 +1,4 @@
-import { PICKER_INDIAN_LANGS as INDIAN_LANGS, PICKER_INTL_LANGS as INTL_LANGS } from '../lib/config.js';
+import { PICKER_INDIAN_LANGS as INDIAN_LANGS, PICKER_INTL_LANGS as INTL_LANGS, AUTH_ENABLED } from '../lib/config.js';
 import { getProfileInfo, signOut } from '../lib/auth.js';
 
 const CONNECT_URL = 'https://vaak-setu.vercel.app/connect-extension';
@@ -60,6 +60,7 @@ async function fillDevices(selectEl, kind, selected) {
 }
 
 async function renderAuthPanel() {
+  if (!AUTH_ENABLED) { authPanelEl.hidden = true; return; }
   const profile = await getProfileInfo();
   if (profile) {
     authPanelEl.innerHTML = `
@@ -87,6 +88,7 @@ async function renderAuthPanel() {
 }
 
 async function updateToggleAvailability() {
+  if (!AUTH_ENABLED) { toggleBtn.disabled = false; toggleBtn.title = ''; return; }
   const profile = await getProfileInfo();
   if (!profile) {
     toggleBtn.disabled = true;
@@ -170,12 +172,14 @@ async function openPermissionTab(tabId) {
 
 async function onToggle() {
   toggleBtn.disabled = true;
-  const profile = await getProfileInfo();
-  if (!profile) {
-    statusLine.textContent = 'Please sign in first.';
-    statusLine.classList.add('error');
-    toggleBtn.disabled = false;
-    return;
+  if (AUTH_ENABLED) {
+    const profile = await getProfileInfo();
+    if (!profile) {
+      statusLine.textContent = 'Please sign in first.';
+      statusLine.classList.add('error');
+      toggleBtn.disabled = false;
+      return;
+    }
   }
   const { running } = await chrome.storage.local.get('running');
 

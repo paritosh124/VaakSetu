@@ -2,6 +2,9 @@
 // In prod, this points at the deployed Vercel serverless functions.
 export const API_BASE = 'https://vaak-setu.vercel.app/api';
 
+// Set to true to re-enable the Supabase login gate.
+export const AUTH_ENABLED = false;
+
 // Language catalogs — mirror src/App.jsx so the popup knows what to offer.
 export const INDIAN_LANGS = [
   { code: 'hi-IN', name: 'Hindi',     native: 'हिन्दी' },
