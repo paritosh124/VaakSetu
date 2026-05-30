@@ -12,12 +12,8 @@
 // agent hears only translated audio, never the raw customer voice.
 import { translateAudio, pivotToSpeech, playBase64Audio } from '../lib/pipeline.js';
 import { getLang, isIndianLang } from '../lib/config.js';
-
-// NOTE: streaming STT is intentionally disabled for now. WebSocket handshake
-// has been unreliable in our test envs (code 1006 closes before open) and
-// turn-based Go Live with batch STT is what we're optimizing right now. To
-// re-enable, restore the SarvamStreamingSTT import + the cap.streamer block
-// in beginCapture, and the await streamer.stop() in endCapture.
+import { SarvamStreamingSTT, supportsStreamingSTT } from '../lib/api/sarvam-streaming.js';
+import { loadSileroSession, SileroVAD } from '../lib/api/silero-vad.js';
 
 let config = null;
 let tabStream = null;
@@ -286,7 +282,7 @@ async function runBatchTurn({ who, blob }) {
 // effective silence. 14 is well above ambient but still well below normal
 // speech (~30-60 RMS at conversational distance).
 const SILENCE_THRESHOLD = 8;  // after 16× boost, AGC off: noise floor ~1.3, speech ~14-20
-const SILENCE_MS = 700;            // dropped from 900 → faster turn end
+const SILENCE_MS = 1500;           // 1.5s silence to close turn — captures full sentences with natural pauses
 const MIN_SPEECH_MS = 500;          // 500ms accumulated active time to arm
 const GAP_TOLERANCE_MS = 600; // tolerate inter-syllable/word dips without resetting activeMs
 const NO_SIGNAL_WARN_MS = 10000;  // 10s — give AudioContext time to unsuspend
@@ -404,6 +400,10 @@ function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd, onNoSignal }) 
   };
 }
 
+// Shared Silero session — loaded once per Go Live session, reused for both
+// customer (tab) and agent (mic) streams. Null if model files aren't present.
+let _sileroSession = null;
+
 async function startGoLive() {
   if (goLive) return;
   try {
@@ -418,24 +418,52 @@ async function startGoLive() {
   activeCapture = null;
   turnLock = false;
   post('goLive', { on: true });
-  post('status', { text: '● Listening' });
+  post('status', { text: '● Loading VAD…' });
 
-  vadLoops.customer = createVadLoop({
-    who: 'customer',
-    stream: tabStream,
-    onSpeechStart: () => beginCapture('customer'),
-    onSpeechEnd:   () => endCapture('customer'),
-    // No onNoSignal — silence on the customer side is normal during a real call.
-  });
-  vadLoops.agent = createVadLoop({
-    who: 'agent',
-    stream: micStream,
-    onSpeechStart: () => beginCapture('agent'),
-    onSpeechEnd:   () => endCapture('agent'),
-    onNoSignal:    () => post('error', {
-      error: 'No mic signal. Open the popup → "Your microphone" → pick your physical mic (not CABLE Output).',
-    }),
-  });
+  // Load Silero model (best-in-class neural VAD). Falls back to energy VAD
+  // gracefully if the model files haven't been downloaded yet.
+  if (!_sileroSession) {
+    try {
+      _sileroSession = await loadSileroSession();
+      console.log('[vaaksetu] Silero VAD session ready');
+    } catch (err) {
+      console.warn('[vaaksetu] Silero VAD unavailable, using energy VAD:', err?.message);
+      _sileroSession = null;
+    }
+  }
+
+  // Factory: builds a VAD for one stream. Silero is used when the session is
+  // available; energy VAD is the fallback.
+  const mkVad = async (who, stream) => {
+    const onSpeechStart = () => beginCapture(who);
+    const onSpeechEnd   = () => endCapture(who);
+    // Only the agent mic warrants a no-signal warning; customer silence is normal.
+    const onNoSignal = who === 'agent'
+      ? () => post('error', { error: 'No mic signal. Open the popup → "Your microphone" → pick your physical mic (not CABLE Output).' })
+      : undefined;
+
+    if (_sileroSession) {
+      const vad = new SileroVAD({ session: _sileroSession, stream, onSpeechStart, onSpeechEnd, onNoSignal });
+      await vad.start();
+      console.log(`[vaaksetu] Silero VAD started for ${who}`);
+      return vad;
+    }
+
+    // Energy VAD fallback (no model files).
+    return createVadLoop({ who, stream, onSpeechStart, onSpeechEnd, onNoSignal });
+  };
+
+  // Start both VADs concurrently.
+  const [customerVad, agentVad] = await Promise.all([
+    mkVad('customer', tabStream),
+    mkVad('agent',    micStream),
+  ]);
+  vadLoops.customer = customerVad;
+  vadLoops.agent    = agentVad;
+
+  const vadType = _sileroSession ? 'Silero' : 'energy';
+  console.log(`[vaaksetu] Go Live started — VAD: ${vadType}`);
+  post('status', { text: '● Listening' });
 }
 
 async function stopGoLive() {
@@ -492,13 +520,14 @@ async function beginCapture(who) {
     who, sourceLang, targetLang, voiceGender, srcLabel, tgtLabel,
     streamer: null, mediaRecorder: null, parts: [],
     blobPromise: null, blobResolve: null,
+    finalReceived: false, // set true when onFinal fires — prevents endCapture double-run
     startedAt: Date.now(),
   };
   activeCapture = cap;
   post('status', { text: `● ${who === 'agent' ? 'You' : 'Customer'} speaking…` });
 
-  // MediaRecorder runs in parallel as the batch fallback (intl source has no
-  // streaming STT) and as a safety net if the WS drops.
+  // MediaRecorder runs in parallel as the batch fallback for intl sources
+  // (Groq Whisper) and as a safety net if the streaming WS drops.
   try {
     const mime = pickMimeType();
     cap.mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
@@ -513,19 +542,72 @@ async function beginCapture(who) {
     post('error', { error: `Recorder failed: ${err.message}` });
   }
 
-  // Streaming STT disabled — endCapture will run the full batch pipeline
-  // off the MediaRecorder blob.
+  // Streaming STT for Indian source — Sarvam is_final drives endpointing.
+  // International source uses batch path (Groq Whisper doesn't stream).
+  if (isIndianLang(sourceLang) && supportsStreamingSTT()) {
+    try {
+      const sttMode = sourceLang === 'en-IN' ? 'transcribe' : 'translate';
+      const streamer = new SarvamStreamingSTT({
+        languageCode: sourceLang,
+        mode: sttMode,
+        onPartial: (text) => post('partial', { who, text }),
+        onFinal: (text) => receiveFinal(who, text),
+      });
+      cap.streamer = streamer;
+      await streamer.start(stream);
+      console.log(`[vaaksetu] streaming STT started for ${who} (${sourceLang})`);
+    } catch (err) {
+      console.warn('[vaaksetu] streaming STT failed to start, batch fallback:', err.message);
+      cap.streamer = null;
+    }
+  }
 }
 
+// Primary end-of-utterance signal for Indian source — fires as soon as
+// Sarvam sends is_final:true, typically while VAD is still counting silence.
+// This path skips the batch STT call entirely and goes straight to
+// translate+TTS, saving ~0.8s per turn.
+async function receiveFinal(who, transcript) {
+  const cap = activeCapture;
+  if (!cap || cap.who !== who || !goLive || cap.finalReceived) return;
+  cap.finalReceived = true;
+  activeCapture = null;
+  console.log(`[vaaksetu] is_final received for ${who}: "${transcript.slice(0, 60)}"`);
+  // Clean up the streamer and recorder — we have what we need.
+  try { cap.streamer?.destroy(); } catch {}
+  try { if (cap.mediaRecorder?.state !== 'inactive') cap.mediaRecorder?.stop(); } catch {}
+  post('partial', { who, text: '', clear: true });
+  await runTurn({ cap, pivotText: transcript, blob: null, endedAt: Date.now() });
+}
+
+// Fallback end-of-utterance: energy VAD silence detection.
+// Fires after SILENCE_MS of quiet. For Indian source, the streamer may
+// already have delivered is_final — in that case, receiveFinal has set
+// cap.finalReceived and we skip here to avoid double-processing.
 async function endCapture(who) {
   const cap = activeCapture;
   if (!cap || cap.who !== who || !goLive) return; // stale event
+  if (cap.finalReceived) return;                   // already handled by receiveFinal
   activeCapture = null;
 
   const endedAt = Date.now();
-  const pivotText = ''; // batch-only path: pivot comes from the STT API call
 
-  // Pull the recorder blob — fed into translateAudio for full batch pipeline.
+  // For Indian source: stop the streamer and use its output as the pivot.
+  // streamer.stop() races the final transcript vs a short timeout and falls
+  // back to the last partial — avoids the full batch STT round-trip.
+  let pivotText = '';
+  if (cap.streamer) {
+    try {
+      const t0 = Date.now();
+      pivotText = await cap.streamer.stop() || '';
+      console.log(`[vaaksetu] streamer.stop() took ${Date.now() - t0}ms, pivot="${pivotText.slice(0, 60)}"`);
+    } catch (err) {
+      console.warn('[vaaksetu] streamer.stop() error:', err?.message);
+    }
+  }
+
+  // Pull the recorder blob — used as batch STT input for intl sources
+  // (Groq Whisper) and as a safety fallback if the streamer returned nothing.
   let blob = null;
   try {
     if (cap.mediaRecorder && cap.mediaRecorder.state !== 'inactive') cap.mediaRecorder.stop();
@@ -622,6 +704,7 @@ function stopAll() {
   try { tabStream?.getTracks()?.forEach((t) => t.stop()); } catch {}
   try { micStream?.getTracks()?.forEach((t) => t.stop()); } catch {}
   tabStream = micStream = null;
+  _sileroSession = null; // release ONNX session memory
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

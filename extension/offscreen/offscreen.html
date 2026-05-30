@@ -2,6 +2,9 @@
 <html>
 <head><meta charset="UTF-8" /><title>VaakSetu offscreen</title></head>
 <body>
+  <!-- onnxruntime-web must load before the module so `self.ort` is available.
+       Download with: bash extension/scripts/download-silero.sh            -->
+  <script src="../lib/ort/ort.min.js" onerror="console.warn('[vaaksetu] ort.min.js not found — run scripts/download-silero.sh to enable Silero VAD')"></script>
   <script type="module" src="offscreen.js"></script>
 </body>
 </html>

@@ -39,10 +39,11 @@ export function supportsStreamingSTT() {
 }
 
 export class SarvamStreamingSTT {
-  constructor({ languageCode, mode = 'translate', onPartial }) {
+  constructor({ languageCode, mode = 'translate', onPartial, onFinal }) {
     this.languageCode = languageCode;
     this.mode = mode;
     this.onPartial = onPartial;
+    this.onFinal = onFinal; // called immediately on is_final — primary end-of-utterance signal
     this._ws = null;
     this._audioCtx = null;
     this._workletNode = null;
@@ -102,6 +103,7 @@ export class SarvamStreamingSTT {
       const isFinal = data.is_final === true || data.type === 'final' || data.final === true;
       if (isFinal) {
         this._finalResolve(text);
+        this.onFinal?.(text); // primary end-of-utterance trigger — fires before stop() is called
       } else {
         this._lastPartial = text;
         this.onPartial?.(text);
