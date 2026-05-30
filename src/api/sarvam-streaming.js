@@ -1,19 +1,19 @@
 /**
  * sarvam-streaming.js — Real-time STT via Sarvam WebSocket
  *
- * Protocol (per Sarvam docs):
- *   1. Connect: wss://api.sarvam.ai/speech-to-text/streaming?api-subscription-key=KEY
- *   2. Send config JSON: { model, mode, language_code, sample_rate }
- *   3. Send audio: binary Int16 PCM frames (16 kHz, mono, little-endian)
- *   4. Receive JSON: { transcript, is_final } — repeated partials, then one final
- *   5. End: close WebSocket (normal close 1000) to signal end of stream
+ * Protocol (Sarvam SDK v1.1.7):
+ *   mode=translate  → wss://api.sarvam.ai/speech-to-text-translate/ws
+ *   mode=transcribe → wss://api.sarvam.ai/speech-to-text/ws?language-code=<code>
  *
- * NOTE: API key is sent in the WebSocket URL query param and is visible in
- * browser devtools Network tab. Accepted trade-off for this project.
+ *   Auth: WebSocket subprotocol `api-subscription-key.<KEY>` (not a query param)
+ *   Config: URL query params (model, sample_rate, input_audio_codec, flush_signal)
+ *   Audio: JSON { audio: { data: base64(Int16PCM), sample_rate: 16000, encoding: "audio/x-raw" } }
+ *   Stop:  send { type: "flush" } → receive { type: "transcript"/"translation", text: "..." }
  */
 
-// AudioWorklet processor — captures microphone as Int16 PCM chunks
-// Loaded as a Blob URL so no separate public/ file is needed
+const WS_BASE = 'wss://api.sarvam.ai';
+
+// AudioWorklet: captures mic as Int16 PCM at 16 kHz, transfers zero-copy
 const WORKLET_SRC = `
 class PCMProcessor extends AudioWorkletProcessor {
   process(inputs) {
@@ -30,34 +30,40 @@ class PCMProcessor extends AudioWorkletProcessor {
 registerProcessor('vs-pcm-processor', PCMProcessor);
 `;
 
-const WS_URL = 'wss://api.sarvam.ai/speech-to-text/streaming';
+function bufToBase64(buf) {
+  const bytes = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer);
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
 
 export class SarvamStreamingSTT {
   /**
    * @param {object} opts
    * @param {string}   opts.apiKey        — Sarvam API subscription key
    * @param {string}   opts.languageCode  — e.g. 'hi-IN', 'te-IN'
-   * @param {string}   [opts.mode]        — 'translate' | 'transcribe' (default: 'translate')
-   * @param {Function} [opts.onPartial]   — (text) => void — called on each interim result
+   * @param {string}   [opts.mode]        — 'translate' (→ English) | 'transcribe' (verbatim)
+   * @param {Function} [opts.onPartial]   — no-op; kept for interface compatibility (API has no partials)
    */
   constructor({ apiKey, languageCode, mode = 'translate', onPartial }) {
-    this.apiKey = apiKey;
+    this.apiKey       = apiKey;
     this.languageCode = languageCode;
-    this.mode = mode;
-    this.onPartial = onPartial;
+    this.mode         = mode;
+    this.onPartial    = onPartial; // retained for interface compat — never fires in new API
 
-    this._ws = null;
-    this._audioCtx = null;
+    this._ws          = null;
+    this._audioCtx    = null;
     this._workletNode = null;
-    this._sourceNode = null;
-    this._lastPartial = '';
-    this._finalResolve = null;
-    this._finalReject = null;
+    this._sourceNode  = null;
+    this._result      = '';
+    this._stopped     = false;
     this._finalPromise = new Promise((res, rej) => {
       this._finalResolve = res;
-      this._finalReject = rej;
+      this._finalReject  = rej;
     });
-    this._stopped = false;
   }
 
   /**
@@ -66,57 +72,52 @@ export class SarvamStreamingSTT {
    * @returns {Promise<void>} resolves when WebSocket is open and AudioWorklet is ready
    */
   async start(mediaStream) {
-    // ── Connect WebSocket ────────────────────────────────────────────────────
-    const url = `${WS_URL}?api-subscription-key=${this.apiKey}`;
-    const ws = new WebSocket(url);
+    const isTranslate = this.mode === 'translate';
+    const path = isTranslate
+      ? '/speech-to-text-translate/ws'
+      : '/speech-to-text/ws';
+
+    // Odia: STT uses or-IN
+    const sttCode = this.languageCode === 'od-IN' ? 'or-IN' : this.languageCode;
+
+    const params = new URLSearchParams({
+      model:             'saaras:v3',
+      sample_rate:       '16000',
+      input_audio_codec: 'pcm_s16le',
+      flush_signal:      'true',
+    });
+    if (!isTranslate) params.set('language-code', sttCode);
+
+    const url = `${WS_BASE}${path}?${params}`;
+    // Auth via WebSocket subprotocol — browsers can't set custom WS headers
+    const ws = new WebSocket(url, [`api-subscription-key.${this.apiKey}`]);
     this._ws = ws;
-    ws.binaryType = 'arraybuffer';
 
     await new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('WebSocket connection timed out')), 6000);
-      ws.onopen = () => { clearTimeout(t); resolve(); };
+      ws.onopen  = () => { clearTimeout(t); resolve(); };
       ws.onerror = () => { clearTimeout(t); reject(new Error('WebSocket connection failed')); };
     });
 
-    // Send initial config
-    // STT streaming also uses 'or-IN' for Odia (same as batch STT)
-    const sttCode = this.languageCode === 'od-IN' ? 'or-IN' : this.languageCode;
-    ws.send(JSON.stringify({
-      model: 'saaras:v3',
-      mode: this.mode,
-      language_code: sttCode,
-    }));
-
-    // Handle messages
-    ws.onmessage = (evt) => {
-      let data;
-      try { data = JSON.parse(evt.data); } catch { return; }
-
-      // Normalise field names — Sarvam may use 'transcript' or 'text'
-      const text = (data.transcript || data.text || '').trim();
-      if (!text) return;
-
-      const isFinal = data.is_final === true || data.type === 'final' || data.final === true;
-      if (isFinal) {
-        this._finalResolve(text);
-      } else {
-        this._lastPartial = text;
-        this.onPartial?.(text);
+    ws.onmessage = ({ data }) => {
+      let msg;
+      try { msg = JSON.parse(data); } catch { return; }
+      if (msg.type === 'transcript' || msg.type === 'translation') {
+        this._result = (msg.text || '').trim();
+        this._finalResolve(this._result);
       }
     };
 
-    ws.onclose = (evt) => {
-      // If we never got an explicit is_final, resolve with last partial
-      if (!this._stopped) return; // unexpected close
-      this._finalResolve(this._lastPartial);
+    ws.onclose = () => {
+      // Fallback: resolve with whatever we have (covers unexpected close)
+      this._finalResolve(this._result);
     };
 
     ws.onerror = () => {
       this._finalReject(new Error('WebSocket error during streaming'));
     };
 
-    // ── Set up AudioWorklet for PCM capture ──────────────────────────────────
-    // Force 16 kHz to minimise upload size; browser resamples from native rate
+    // AudioWorklet at 16 kHz — browser resamples from native rate
     this._audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
 
     const blob = new Blob([WORKLET_SRC], { type: 'application/javascript' });
@@ -127,56 +128,60 @@ export class SarvamStreamingSTT {
     this._workletNode = new AudioWorkletNode(this._audioCtx, 'vs-pcm-processor');
     this._workletNode.port.onmessage = ({ data: buf }) => {
       if (this._ws?.readyState === WebSocket.OPEN) {
-        this._ws.send(buf);
+        this._ws.send(JSON.stringify({
+          audio: {
+            data:        bufToBase64(buf),
+            sample_rate: 16000,
+            encoding:    'audio/x-raw',
+          },
+        }));
       }
     };
 
     this._sourceNode = this._audioCtx.createMediaStreamSource(mediaStream);
     this._sourceNode.connect(this._workletNode);
-    // Don't connect workletNode to destination — we don't want to hear ourselves
   }
 
   /**
-   * Stop recording and wait for the final transcript from Sarvam.
-   * @param {number} [timeoutMs=4000]
-   * @returns {Promise<string>} final transcript (English pivot or verbatim)
+   * Stop recording. Sends flush → waits for final transcript.
+   * @param {number} [timeoutMs=2000]
+   * @returns {Promise<string>}
    */
-  async stop(timeoutMs = 4000) {
+  async stop(timeoutMs = 2000) {
     this._stopped = true;
 
-    // Disconnect audio pipeline
     try { this._sourceNode?.disconnect(); } catch {}
     try { this._workletNode?.disconnect(); } catch {}
-    try { this._audioCtx?.close(); } catch {}
-    this._sourceNode = null;
+    try { this._audioCtx?.close(); }        catch {}
+    this._sourceNode  = null;
     this._workletNode = null;
-    this._audioCtx = null;
+    this._audioCtx    = null;
 
-    // Signal end of audio to Sarvam — closing the socket triggers final response
+    // flush = ask Sarvam to finalize the transcript immediately
     if (this._ws?.readyState === WebSocket.OPEN) {
-      this._ws.close(1000, 'end-of-speech');
+      this._ws.send(JSON.stringify({ type: 'flush' }));
     }
 
-    // Race: final transcript vs timeout fallback
-    const timeout = new Promise((resolve) =>
-      setTimeout(() => resolve(this._lastPartial), timeoutMs)
-    );
+    const result = await Promise.race([
+      this._finalPromise,
+      new Promise((r) => setTimeout(() => r(this._result), timeoutMs)),
+    ]);
 
-    const result = await Promise.race([this._finalPromise, timeout]);
+    try { this._ws?.close(1000); } catch {}
     this._ws = null;
-    return result || '';
+    return (result || '').trim();
   }
 
   destroy() {
     this._stopped = true;
     try { this._sourceNode?.disconnect(); } catch {}
     try { this._workletNode?.disconnect(); } catch {}
-    try { this._audioCtx?.close(); } catch {}
-    try { this._ws?.close(); } catch {}
+    try { this._audioCtx?.close(); }        catch {}
+    try { this._ws?.close(); }              catch {}
   }
 }
 
-/** Returns true if the browser supports AudioWorklet (Chrome, Safari 14.5+, Firefox) */
+/** Returns true if the browser supports AudioWorklet + WebSocket */
 export function supportsStreamingSTT() {
   return typeof AudioWorkletNode !== 'undefined' && typeof WebSocket !== 'undefined';
 }

@@ -542,7 +542,7 @@ async function beginCapture(who) {
     post('error', { error: `Recorder failed: ${err.message}` });
   }
 
-  // Streaming STT for Indian source — Sarvam is_final drives endpointing.
+  // Streaming STT for Indian source — sends flush on VAD silence to get transcript.
   // International source uses batch path (Groq Whisper doesn't stream).
   if (isIndianLang(sourceLang) && supportsStreamingSTT()) {
     try {
@@ -563,16 +563,14 @@ async function beginCapture(who) {
   }
 }
 
-// Primary end-of-utterance signal for Indian source — fires as soon as
-// Sarvam sends is_final:true, typically while VAD is still counting silence.
-// This path skips the batch STT call entirely and goes straight to
-// translate+TTS, saving ~0.8s per turn.
+// Fast path: fires when Sarvam's server VAD detects speech_end and the
+// transcript arrives before our local VAD fires endCapture. Skips batch STT.
 async function receiveFinal(who, transcript) {
   const cap = activeCapture;
   if (!cap || cap.who !== who || !goLive || cap.finalReceived) return;
   cap.finalReceived = true;
   activeCapture = null;
-  console.log(`[vaaksetu] is_final received for ${who}: "${transcript.slice(0, 60)}"`);
+  console.log(`[vaaksetu] receiveFinal for ${who}: "${transcript.slice(0, 60)}"`);
   // Clean up the streamer and recorder — we have what we need.
   try { cap.streamer?.destroy(); } catch {}
   try { if (cap.mediaRecorder?.state !== 'inactive') cap.mediaRecorder?.stop(); } catch {}
@@ -580,10 +578,9 @@ async function receiveFinal(who, transcript) {
   await runTurn({ cap, pivotText: transcript, blob: null, endedAt: Date.now() });
 }
 
-// Fallback end-of-utterance: energy VAD silence detection.
-// Fires after SILENCE_MS of quiet. For Indian source, the streamer may
-// already have delivered is_final — in that case, receiveFinal has set
-// cap.finalReceived and we skip here to avoid double-processing.
+// Fallback end-of-utterance: VAD silence detection.
+// Fires after SILENCE_MS of quiet. If receiveFinal already handled the turn
+// (server transcript arrived first), cap.finalReceived is true → skip.
 async function endCapture(who) {
   const cap = activeCapture;
   if (!cap || cap.who !== who || !goLive) return; // stale event
@@ -592,9 +589,8 @@ async function endCapture(who) {
 
   const endedAt = Date.now();
 
-  // For Indian source: stop the streamer and use its output as the pivot.
-  // streamer.stop() races the final transcript vs a short timeout and falls
-  // back to the last partial — avoids the full batch STT round-trip.
+  // For Indian source: send flush → wait for transcript (up to 2s).
+  // Avoids the full batch STT round-trip (~800ms saved).
   let pivotText = '';
   if (cap.streamer) {
     try {

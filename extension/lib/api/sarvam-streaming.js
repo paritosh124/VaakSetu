@@ -2,9 +2,12 @@
 // Key differences vs webapp:
 //   - No Vite env — key is fetched once from /api/sarvam-ws-key and cached.
 //   - AudioContext is created from the passed-in MediaStream source (tab or mic).
-//   - Runs inside the offscreen document, which behaves like a normal page.
+//   - Runs inside the offscreen document (behaves like a normal page).
+//   - onFinal callback fires on transcript arrival for the Phase-1 fast path.
 import { API_BASE } from '../config.js';
 import { authedFetch } from '../auth.js';
+
+const WS_BASE = 'wss://api.sarvam.ai';
 
 const WORKLET_SRC = `
 class PCMProcessor extends AudioWorkletProcessor {
@@ -22,7 +25,15 @@ class PCMProcessor extends AudioWorkletProcessor {
 registerProcessor('vs-pcm-processor', PCMProcessor);
 `;
 
-const WS_URL = 'wss://api.sarvam.ai/speech-to-text/streaming';
+function bufToBase64(buf) {
+  const bytes = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer);
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
 
 let _cachedKey = null;
 async function getKey() {
@@ -41,18 +52,19 @@ export function supportsStreamingSTT() {
 export class SarvamStreamingSTT {
   constructor({ languageCode, mode = 'translate', onPartial, onFinal }) {
     this.languageCode = languageCode;
-    this.mode = mode;
-    this.onPartial = onPartial;
-    this.onFinal = onFinal; // called immediately on is_final — primary end-of-utterance signal
-    this._ws = null;
-    this._audioCtx = null;
+    this.mode         = mode;
+    this.onPartial    = onPartial; // no-op in new API — no partials; kept for interface compat
+    this.onFinal      = onFinal;  // fires on transcript receipt — used for Phase-1 fast path
+
+    this._ws          = null;
+    this._audioCtx    = null;
     this._workletNode = null;
-    this._sourceNode = null;
-    this._lastPartial = '';
-    this._stopped = false;
+    this._sourceNode  = null;
+    this._result      = '';
+    this._stopped     = false;
     this._finalPromise = new Promise((res, rej) => {
       this._finalResolve = res;
-      this._finalReject = rej;
+      this._finalReject  = rej;
     });
   }
 
@@ -60,11 +72,27 @@ export class SarvamStreamingSTT {
     const apiKey = await getKey();
     if (!apiKey) throw new Error('No Sarvam key available for streaming');
 
-    const url = `${WS_URL}?api-subscription-key=${apiKey}`;
-    console.log('[vaaksetu streaming] opening WS; key prefix:', (apiKey || '').slice(0, 6), 'len:', (apiKey || '').length);
-    const ws = new WebSocket(url);
+    const isTranslate = this.mode === 'translate';
+    const path = isTranslate
+      ? '/speech-to-text-translate/ws'
+      : '/speech-to-text/ws';
+
+    const sttCode = this.languageCode === 'od-IN' ? 'or-IN' : this.languageCode;
+
+    const params = new URLSearchParams({
+      model:             'saaras:v3',
+      sample_rate:       '16000',
+      input_audio_codec: 'pcm_s16le',
+      flush_signal:      'true',
+    });
+    if (!isTranslate) params.set('language-code', sttCode);
+
+    const url = `${WS_BASE}${path}?${params}`;
+    console.log(`[vaaksetu streaming] opening WS path=${path} key prefix=${apiKey.slice(0, 6)} len=${apiKey.length}`);
+
+    // Auth via subprotocol — browsers can't set custom WS headers
+    const ws = new WebSocket(url, [`api-subscription-key.${apiKey}`]);
     this._ws = ws;
-    ws.binaryType = 'arraybuffer';
 
     await new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error('WebSocket connection timed out after 6s')), 6000);
@@ -75,50 +103,40 @@ export class SarvamStreamingSTT {
       };
       ws.onerror = (ev) => {
         clearTimeout(t);
-        console.error('[vaaksetu streaming] WS error event', ev);
-        reject(new Error('WebSocket handshake failed — check Network tab for the 101/4xx status'));
+        console.error('[vaaksetu streaming] WS error on connect', ev);
+        reject(new Error('WebSocket handshake failed'));
       };
       ws.onclose = (ev) => {
-        // Only reject if we never opened (close fires without open).
         if (ws.readyState !== WebSocket.OPEN && !this._stopped) {
           clearTimeout(t);
           console.error(`[vaaksetu streaming] WS closed before open code=${ev.code} reason=${ev.reason || '(none)'}`);
-          reject(new Error(`WebSocket closed before open: code=${ev.code} reason="${ev.reason || ''}"`));
+          reject(new Error(`WebSocket closed before open: code=${ev.code}`));
         }
       };
     });
 
-    const sttCode = this.languageCode === 'od-IN' ? 'or-IN' : this.languageCode;
-    ws.send(JSON.stringify({
-      model: 'saaras:v3',
-      mode: this.mode,
-      language_code: sttCode,
-    }));
+    ws.onmessage = ({ data }) => {
+      let msg;
+      try { msg = JSON.parse(data); } catch { return; }
 
-    ws.onmessage = (evt) => {
-      let data;
-      try { data = JSON.parse(evt.data); } catch { return; }
-      const text = (data.transcript || data.text || '').trim();
-      if (!text) return;
-      const isFinal = data.is_final === true || data.type === 'final' || data.final === true;
-      if (isFinal) {
+      if (msg.type === 'transcript' || msg.type === 'translation') {
+        const text = (msg.text || '').trim();
+        this._result = text;
         this._finalResolve(text);
-        this.onFinal?.(text); // primary end-of-utterance trigger — fires before stop() is called
-      } else {
-        this._lastPartial = text;
-        this.onPartial?.(text);
+        // Fire onFinal for Phase-1 receiveFinal() fast path (if activeCapture is still set)
+        if (text) this.onFinal?.(text);
       }
     };
 
     ws.onclose = () => {
-      if (!this._stopped) return;
-      this._finalResolve(this._lastPartial);
+      // Fallback resolve in case flush response never arrived
+      this._finalResolve(this._result);
     };
+
     ws.onerror = () => {
       this._finalReject(new Error('WebSocket error during streaming'));
     };
 
-    // AudioWorklet at 16 kHz — browser resamples from native.
     const AC = self.AudioContext || self.webkitAudioContext;
     this._audioCtx = new AC({ sampleRate: 16000 });
     const blob = new Blob([WORKLET_SRC], { type: 'application/javascript' });
@@ -128,48 +146,45 @@ export class SarvamStreamingSTT {
 
     this._workletNode = new AudioWorkletNode(this._audioCtx, 'vs-pcm-processor');
     this._workletNode.port.onmessage = ({ data: buf }) => {
-      if (this._ws?.readyState === WebSocket.OPEN) this._ws.send(buf);
+      if (this._ws?.readyState === WebSocket.OPEN) {
+        this._ws.send(JSON.stringify({
+          audio: {
+            data:        bufToBase64(buf),
+            sample_rate: 16000,
+            encoding:    'audio/x-raw',
+          },
+        }));
+      }
     };
 
     this._sourceNode = this._audioCtx.createMediaStreamSource(mediaStream);
     this._sourceNode.connect(this._workletNode);
   }
 
-  // The biggest latency win in Go Live: don't wait for Sarvam's final
-  // transcript if we already have a good partial. Sarvam's "final" is
-  // typically the last partial with minor cleanup (punctuation, casing);
-  // it can arrive anywhere from 100ms to several seconds after we close the
-  // socket. Returning `_lastPartial` immediately shaves 1–4s off each turn.
-  // If the final happens to arrive within `maxWaitMs`, prefer it.
-  async stop(maxWaitMs = 250) {
+  // Send flush → wait for transcript. maxWaitMs is the fallback timeout.
+  async stop(maxWaitMs = 2000) {
     this._stopped = true;
+
     try { this._sourceNode?.disconnect(); } catch {}
     try { this._workletNode?.disconnect(); } catch {}
-    try { this._audioCtx?.close(); } catch {}
-    this._sourceNode = null;
+    try { this._audioCtx?.close(); }        catch {}
+    this._sourceNode  = null;
     this._workletNode = null;
-    this._audioCtx = null;
+    this._audioCtx    = null;
 
+    const t0 = Date.now();
     if (this._ws?.readyState === WebSocket.OPEN) {
-      this._ws.close(1000, 'end-of-speech');
+      this._ws.send(JSON.stringify({ type: 'flush' }));
     }
 
-    if (this._lastPartial) {
-      const cleanFinal = Promise.race([
-        this._finalPromise,
-        new Promise((r) => setTimeout(() => r(this._lastPartial), maxWaitMs)),
-      ]);
-      const result = await cleanFinal;
-      this._ws = null;
-      return (result || this._lastPartial || '').trim();
-    }
-
-    // No partial at all — a very short utterance. Give the server a bit
-    // more time since we have nothing to fall back on.
     const result = await Promise.race([
       this._finalPromise,
-      new Promise((r) => setTimeout(() => r(''), 1200)),
+      new Promise((r) => setTimeout(() => r(this._result), maxWaitMs)),
     ]);
+
+    console.log(`[vaaksetu streaming] stop() took ${Date.now() - t0}ms result="${(result || '').slice(0, 60)}"`);
+
+    try { this._ws?.close(1000); } catch {}
     this._ws = null;
     return (result || '').trim();
   }
@@ -178,7 +193,7 @@ export class SarvamStreamingSTT {
     this._stopped = true;
     try { this._sourceNode?.disconnect(); } catch {}
     try { this._workletNode?.disconnect(); } catch {}
-    try { this._audioCtx?.close(); } catch {}
-    try { this._ws?.close(); } catch {}
+    try { this._audioCtx?.close(); }        catch {}
+    try { this._ws?.close(); }              catch {}
   }
 }
