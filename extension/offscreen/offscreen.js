@@ -289,16 +289,14 @@ const SILENCE_THRESHOLD = 14;
 const SILENCE_MS = 700;            // dropped from 900 → faster turn end
 const MIN_SPEECH_MS = 400;          // bump 320 → 400 to reject brief noise blips
 const GAP_TOLERANCE_MS = 250;
-const NO_SIGNAL_WARN_MS = 6000;
+const NO_SIGNAL_WARN_MS = 10000;  // 10s — give AudioContext time to unsuspend
+const NO_SIGNAL_RMS_THRESHOLD = 0.5; // truly zero signal — avoids false-fire on quiet rooms
 
 function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd, onNoSignal }) {
   const ac = new AudioContext();
-  // Offscreen docs don't inherit the widget's click as a user gesture, so
-  // new AudioContext() may be created in "suspended" state. Without
-  // resume(), the analyser never processes samples and VAD never fires.
-  if (ac.state === 'suspended') {
-    ac.resume().catch((e) => console.warn('[vaaksetu] VAD ctx resume failed', who, e));
-  }
+  // Always attempt resume — offscreen docs don't inherit a user gesture so the
+  // context may be suspended regardless of what ac.state reports at creation.
+  ac.resume().catch((e) => console.warn('[vaaksetu] VAD ctx resume failed', who, e));
   const src = ac.createMediaStreamSource(stream);
   const analyser = ac.createAnalyser();
   analyser.fftSize = 512;
@@ -344,10 +342,10 @@ function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd, onNoSignal }) 
 
     if (now - lastDebugAt >= 2000) {
       console.log(`[vaaksetu VAD ${who}] state=${ac.state} peakRms=${peakRms.toFixed(1)} threshold=${SILENCE_THRESHOLD} armed=${armed} activeMs=${activeMs}`);
-      if (peakRms < 1.5) noSignalMs += (now - lastDebugAt); else noSignalMs = 0;
+      if (peakRms < NO_SIGNAL_RMS_THRESHOLD) noSignalMs += (now - lastDebugAt); else noSignalMs = 0;
       if (!warnedNoSignal && noSignalMs >= NO_SIGNAL_WARN_MS) {
         warnedNoSignal = true;
-        console.warn(`[vaaksetu VAD ${who}] NO SIGNAL — check popup device picker`);
+        console.warn(`[vaaksetu VAD ${who}] NO SIGNAL after ${NO_SIGNAL_WARN_MS}ms — peakRms always < ${NO_SIGNAL_RMS_THRESHOLD}, ctx.state=${ac.state}`);
         onNoSignal?.();
       }
       lastDebugAt = now;
