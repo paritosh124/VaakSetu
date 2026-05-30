@@ -285,7 +285,7 @@ async function runBatchTurn({ who, blob }) {
 // sustained, which was triggering Saaras to hallucinate "yes yes yes…" on
 // effective silence. 14 is well above ambient but still well below normal
 // speech (~30-60 RMS at conversational distance).
-const SILENCE_THRESHOLD = 14;
+const SILENCE_THRESHOLD = 8;  // batch STT only — no streaming hallucination risk
 const SILENCE_MS = 700;            // dropped from 900 → faster turn end
 const MIN_SPEECH_MS = 400;          // bump 320 → 400 to reject brief noise blips
 const GAP_TOLERANCE_MS = 250;
