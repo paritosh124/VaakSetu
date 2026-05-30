@@ -18,6 +18,8 @@
 // the session, so widget/popup can show the user's email/role without
 // hitting the DB on every popup open.
 
+import { AUTH_ENABLED } from './config.js';
+
 const STORAGE_KEY = 'vaaksetu_session';
 
 // Some extension contexts (notably offscreen documents in some Chrome
@@ -160,8 +162,6 @@ export async function signOut() {
 // Plain fetch wrapper that attaches Authorization automatically.
 // When AUTH_ENABLED is false, falls through to plain fetch so the extension
 // works without a Supabase session.
-import { AUTH_ENABLED } from './config.js';
-
 export async function authedFetch(url, options = {}) {
   if (!AUTH_ENABLED) return fetch(url, options);
   const token = await getAccessToken();

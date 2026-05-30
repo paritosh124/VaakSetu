@@ -87,11 +87,8 @@ function looksHallucinated(text) {
 function friendlyError(err) {
   console.error('[vaaksetu pipeline error]', err?.message, err?.stack || err);
   const msg = err?.message || String(err) || 'Unknown error';
-  if (msg === 'NOT_SIGNED_IN' || msg.includes('NOT_SIGNED_IN')) {
-    return 'Signed out. Open the VaakSetu popup and sign in again.';
-  }
   if (msg.includes('401') || msg.toLowerCase().includes('unauthorized')) {
-    return 'Session expired. Open the popup and sign in again.';
+    return 'API request unauthorised. Check that the server has AUTH_ENABLED=false set.';
   }
   return msg;
 }
