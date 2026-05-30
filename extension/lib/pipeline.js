@@ -14,8 +14,10 @@
 import { speechToText, translateText, textToSpeech, playBase64Audio } from './api/sarvam.js';
 import { streamingTextToSpeech, streamingTTSSupported } from './api/sarvam-tts-stream.js';
 import { groqSpeechToEnglish, groqTranslate } from './api/groq.js';
-import { openaiTTS } from './api/openai.js';
+import { googleTTS } from './api/google-tts.js';
 import { isIndianLang, getLang } from './config.js';
+
+// TTS: target intl → Google Cloud TTS (free tier: 4M chars/month Standard voices)
 
 const SARVAM_VOICE = { male: 'anand', female: 'ritu' };
 
@@ -148,7 +150,7 @@ export async function pivotToSpeech({ pivotText, sourceLang, targetLang, voiceGe
     } else {
       const pieces = splitForFastFirstChunk(translatedText);
       console.log(`[vaaksetu tts] intl pieces:`, pieces.length, pieces.map((p) => p.length));
-      const promises = pieces.map((p) => openaiTTS({ text: p, voiceGender }));
+      const promises = pieces.map((p) => googleTTS({ text: p, languageCode: targetLang, voiceGender }));
       const queued = [];
       for (const p of promises) {
         const b64Promise = p;

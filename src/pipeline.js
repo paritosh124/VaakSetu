@@ -9,8 +9,9 @@
 
 import { speechToText, translateText, textToSpeech, playBase64Audio } from './api/sarvam.js';
 import { streamingTextToSpeech, streamingTTSSupported } from './api/sarvam-tts-stream.js';
-import { openaiSpeechToEnglish, openaiSpeechToText, openaiTranslate, openaiTTS } from './api/openai.js';
+import { openaiSpeechToEnglish, openaiTranslate, openaiTTS } from './api/openai.js';
 import { groqSpeechToEnglish, groqTranslate, browserTTS } from './api/groq.js';
+import { googleTTS } from './api/google-tts.js';
 
 /**
  * Sender half — used in remote (two-phone) mode.
@@ -249,14 +250,13 @@ export async function runGroqPipeline({
 
   onStep('tts', 'Generating voice…');
 
-  const voice = voiceGender === 'female' ? 'nova' : 'onyx';
-  if (openaiKey || !import.meta.env.DEV) {
-    const audioB64 = await openaiTTS({ text: translatedText, voice, apiKey: openaiKey });
+  try {
+    const audioB64 = await googleTTS({ text: translatedText, languageCode: targetLang, voiceGender });
     onStep('playing', 'Playing…');
     const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
     return { pivotText, translatedText, audioB64, audioPromise };
-  } else {
-    // Dev fallback when no OpenAI key configured
+  } catch {
+    // Fallback to browser TTS if Google TTS fails (e.g. no API key in dev)
     onStep('playing', 'Playing…');
     const audioPromise = browserTTS({ text: translatedText, languageCode: targetLang, voiceGender })
       .then(() => onStep('done', ''))
@@ -298,13 +298,12 @@ export async function groqEnglishToSpeech({
 
   onStep?.('tts', 'Generating voice…');
 
-  const voice = voiceGender === 'female' ? 'nova' : 'onyx';
-  if (openaiKey || !import.meta.env.DEV) {
-    const audioB64 = await openaiTTS({ text: translatedText, voice, apiKey: openaiKey });
+  try {
+    const audioB64 = await googleTTS({ text: translatedText, languageCode: targetLang, voiceGender });
     onStep?.('playing', 'Playing…');
     const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
     return { pivotText, translatedText, audioB64, audioPromise };
-  } else {
+  } catch {
     onStep?.('playing', 'Playing…');
     const audioPromise = browserTTS({ text: translatedText, languageCode: targetLang, voiceGender })
       .then(() => onStep?.('done', ''))
