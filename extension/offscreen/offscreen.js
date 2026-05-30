@@ -644,10 +644,18 @@ async function runTurn({ cap, pivotText, blob, endedAt }) {
   };
   let aborted = false;
   const onText = (pivot, translated) => {
+    const p = (pivot     || '').trim();
+    const t = (translated || '').trim();
+    // Empty transcript: STT heard nothing (too short or pure silence).
+    // Abort before TTS so we don't send "" to Sarvam and get a 400 error.
+    if (!p && !t) {
+      aborted = true;
+      throw new Error('EMPTY_TRANSCRIPT');
+    }
     console.log(`[vaaksetu text ${who}] pivot (${sourceLang}): ${JSON.stringify(pivot)}`);
     console.log(`[vaaksetu text ${who}] final (${targetLang}): ${JSON.stringify(translated)}`);
-    if (looksHallucinated(pivot)) {
-      console.warn(`[vaaksetu] dropping turn — pivot looks hallucinated (likely silence/noise): "${pivot.slice(0, 80)}…"`);
+    if (looksHallucinated(p)) {
+      console.warn(`[vaaksetu] dropping turn — pivot looks hallucinated (likely silence/noise): "${p.slice(0, 80)}…"`);
       aborted = true;
       throw new Error('HALLUCINATED_PIVOT');
     }
