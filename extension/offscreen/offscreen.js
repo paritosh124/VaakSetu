@@ -114,7 +114,7 @@ async function ensureMicStream() {
   const audio = {
     echoCancellation: true,
     noiseSuppression: true,
-    autoGainControl: false, // off: preserves the amplitude gap between speech and ambient noise
+    autoGainControl: true,
   };
   // Only pin a specific device when the user picked one explicitly.
   // `default` means "let Chrome pick the system default" — and Chrome picks
@@ -285,9 +285,9 @@ async function runBatchTurn({ who, blob }) {
 // sustained, which was triggering Saaras to hallucinate "yes yes yes…" on
 // effective silence. 14 is well above ambient but still well below normal
 // speech (~30-60 RMS at conversational distance).
-const SILENCE_THRESHOLD = 12; // applied after 4× boost; requires ~3 raw RMS — filters ambient noise
+const SILENCE_THRESHOLD = 10; // after 8× boost: noise floor ~6, speech ~15+
 const SILENCE_MS = 700;            // dropped from 900 → faster turn end
-const MIN_SPEECH_MS = 400;          // bump 320 → 400 to reject brief noise blips
+const MIN_SPEECH_MS = 600;          // 600ms sustained speech required — rejects short noise bursts
 const GAP_TOLERANCE_MS = 250;
 const NO_SIGNAL_WARN_MS = 10000;  // 10s — give AudioContext time to unsuspend
 const NO_SIGNAL_RMS_THRESHOLD = 0.5; // truly zero signal — avoids false-fire on quiet rooms
@@ -304,7 +304,7 @@ function createVadLoop({ who, stream, onSpeechStart, onSpeechEnd, onNoSignal }) 
   // are amplified to a detectable range. MediaRecorder captures directly from the
   // stream, so this only affects VAD measurement, not the recorded audio.
   const boost = ac.createGain();
-  boost.gain.value = 4;
+  boost.gain.value = 8;
   // Terminate graph into a muted gain → destination. Some Chromium builds
   // prune subgraphs that don't reach destination, which would freeze the analyser.
   const mute = ac.createGain();
