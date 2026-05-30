@@ -419,9 +419,7 @@ async function startGoLive() {
     stream: tabStream,
     onSpeechStart: () => beginCapture('customer'),
     onSpeechEnd:   () => endCapture('customer'),
-    onNoSignal:    () => post('error', {
-      error: 'No customer audio reaching the extension. Is the Meet tab active and unmuted at the OS level?',
-    }),
+    // No onNoSignal — silence on the customer side is normal during a real call.
   });
   vadLoops.agent = createVadLoop({
     who: 'agent',
