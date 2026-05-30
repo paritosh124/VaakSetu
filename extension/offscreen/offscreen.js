@@ -285,10 +285,10 @@ async function runBatchTurn({ who, blob }) {
 // sustained, which was triggering Saaras to hallucinate "yes yes yes…" on
 // effective silence. 14 is well above ambient but still well below normal
 // speech (~30-60 RMS at conversational distance).
-const SILENCE_THRESHOLD = 10; // after 16× boost, AGC off: noise ~3-8, speech ~16+
+const SILENCE_THRESHOLD = 8;  // after 16× boost, AGC off: noise floor ~1.3, speech ~14-20
 const SILENCE_MS = 700;            // dropped from 900 → faster turn end
-const MIN_SPEECH_MS = 700;          // 700ms sustained speech — rejects all but the longest noise bursts
-const GAP_TOLERANCE_MS = 250;
+const MIN_SPEECH_MS = 500;          // 500ms accumulated active time to arm
+const GAP_TOLERANCE_MS = 600; // tolerate inter-syllable/word dips without resetting activeMs
 const NO_SIGNAL_WARN_MS = 10000;  // 10s — give AudioContext time to unsuspend
 const NO_SIGNAL_RMS_THRESHOLD = 0.5; // truly zero signal — avoids false-fire on quiet rooms
 
