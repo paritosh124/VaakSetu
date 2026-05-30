@@ -17,4 +17,4 @@ export const supabase = url && anonKey
     })
   : null;
 
-export const authEnabled = Boolean(supabase);
+export const authEnabled = Boolean(supabase) && import.meta.env.VITE_AUTH_ENABLED !== 'false';

@@ -15,7 +15,7 @@ import { handlePreflight } from './_cors.js';
 
 const SUPABASE_URL       = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 const SERVICE_ROLE_KEY   = process.env.SUPABASE_SERVICE_ROLE_KEY;
-export const authEnabled = Boolean(SUPABASE_URL && SERVICE_ROLE_KEY);
+export const authEnabled = Boolean(SUPABASE_URL && SERVICE_ROLE_KEY) && process.env.AUTH_ENABLED !== 'false';
 
 // Service-role client bypasses RLS — safe here because we're running on the
 // server behind Vercel's env-var secrecy, and we only use it to (a) validate

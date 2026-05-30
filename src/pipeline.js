@@ -11,7 +11,6 @@ import { speechToText, translateText, textToSpeech, playBase64Audio } from './ap
 import { streamingTextToSpeech, streamingTTSSupported } from './api/sarvam-tts-stream.js';
 import { openaiSpeechToEnglish, openaiSpeechToText, openaiTranslate, openaiTTS } from './api/openai.js';
 import { groqSpeechToEnglish, groqTranslate, browserTTS } from './api/groq.js';
-import { elevenLabsTTS } from './api/elevenlabs.js';
 
 /**
  * Sender half — used in remote (two-phone) mode.
@@ -231,7 +230,7 @@ export async function runGroqPipeline({
   targetLangName,
   voiceGender,
   groqKey,
-  elevenLabsKey,
+  openaiKey,
   onStep,
   onText,
 }) {
@@ -250,14 +249,14 @@ export async function runGroqPipeline({
 
   onStep('tts', 'Generating voice…');
 
-  if (elevenLabsKey) {
-    // ElevenLabs — best quality, returns audio for replay
-    const audioB64 = await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey });
+  const voice = voiceGender === 'female' ? 'nova' : 'onyx';
+  if (openaiKey || !import.meta.env.DEV) {
+    const audioB64 = await openaiTTS({ text: translatedText, voice, apiKey: openaiKey });
     onStep('playing', 'Playing…');
     const audioPromise = playBase64Audio(audioB64).then(() => onStep('done', ''));
     return { pivotText, translatedText, audioB64, audioPromise };
   } else {
-    // Browser TTS — free, no replay (doesn't return audio data)
+    // Dev fallback when no OpenAI key configured
     onStep('playing', 'Playing…');
     const audioPromise = browserTTS({ text: translatedText, languageCode: targetLang, voiceGender })
       .then(() => onStep('done', ''))
@@ -283,7 +282,7 @@ export async function groqEnglishToSpeech({
   targetLangName,
   voiceGender,
   groqKey,
-  elevenLabsKey,
+  openaiKey,
   onStep,
   onText,
 }) {
@@ -299,8 +298,9 @@ export async function groqEnglishToSpeech({
 
   onStep?.('tts', 'Generating voice…');
 
-  if (elevenLabsKey) {
-    const audioB64 = await elevenLabsTTS({ text: translatedText, voiceGender, apiKey: elevenLabsKey });
+  const voice = voiceGender === 'female' ? 'nova' : 'onyx';
+  if (openaiKey || !import.meta.env.DEV) {
+    const audioB64 = await openaiTTS({ text: translatedText, voice, apiKey: openaiKey });
     onStep?.('playing', 'Playing…');
     const audioPromise = playBase64Audio(audioB64).then(() => onStep?.('done', ''));
     return { pivotText, translatedText, audioB64, audioPromise };

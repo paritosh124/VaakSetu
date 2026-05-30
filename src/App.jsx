@@ -313,7 +313,6 @@ export default function App() {
 
     const needsIntlA = !isIndianLang(langA);
     const effectiveGroqKeyP = groqKey || import.meta.env.VITE_GROQ_API_KEY || '';
-    const effectiveELKeyP   = elevenLabsKey || import.meta.env.VITE_ELEVENLABS_API_KEY || '';
     const useGroqA   = needsIntlA && !!effectiveGroqKeyP;
     const useOpenAI  = needsIntlA && !useGroqA && !!openaiKey;
     if (needsIntlA) console.log('[pipeline] partner intl →', useGroqA ? 'Groq' : useOpenAI ? 'OpenAI' : 'none');
@@ -346,7 +345,7 @@ export default function App() {
             targetLangName: tgtLang.name,
             voiceGender: voiceA,
             groqKey: effectiveGroqKeyP,
-            elevenLabsKey: effectiveELKeyP,
+            openaiKey,
             onStep,
             onText,
           })
@@ -622,7 +621,7 @@ export default function App() {
           targetLangName: tgtLang.name,
           voiceGender: listenerVoice,
           groqKey: effectiveGroqKey,
-          elevenLabsKey: elevenLabsKey || import.meta.env.VITE_ELEVENLABS_API_KEY || '',
+          openaiKey,
           onStep,
           onText,
         });
