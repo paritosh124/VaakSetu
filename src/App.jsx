@@ -973,7 +973,7 @@ function PersonSelector({ color, label, lang, voice, langType, onLangChange, onV
 
       {/* Indian / International toggle */}
       <div style={{ display: 'flex', gap: 3, marginBottom: 4 }}>
-        {[['indian', '🇮🇳 Indian'], ['intl', '🌍 Intl']].map(([type, lbl]) => (
+        {[['indian', '🇮🇳 Indian'], ['intl', '🌍 International']].map(([type, lbl]) => (
           <button
             key={type}
             style={{
