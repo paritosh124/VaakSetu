@@ -417,6 +417,7 @@ Pending:
 - [ ] Cache TTS for common short phrases
 
 ## Known Issues / Pending
+- [x] Sarvam batch STT 400 "audio duration exceeds 30 seconds" — fixed by 25s `maxRecTimerRef` hard cap in `startRecording`; streaming STT is primary (no limit), batch is only the fallback when WS returns empty
 - [ ] Two-phone Go Live: auto-restart timing (350ms gap) may need tuning per device
 - [ ] No TURN servers configured — WebRTC may fail on symmetric NAT (enterprise/VPN networks); would need a paid TURN provider (e.g. Twilio, Metered) for full reliability
 - [ ] Silero VAD model files not bundled — must run `bash extension/scripts/download-silero.sh` manually before neural VAD activates; extension falls back to energy VAD if files absent
@@ -793,6 +794,12 @@ No new server-side keys beyond what the webapp uses. The extension's
   Mode maps to endpoint path: `mode='translate'` → `/speech-to-text-translate/ws` (no `language-code` param, Sarvam auto-detects Indian source); `mode='transcribe'` → `/speech-to-text/ws?language-code=<code>`. No partial transcripts in the new API — `onPartial` is kept for interface compat but never fires. Both `src/api/sarvam-streaming.js` and `extension/lib/api/sarvam-streaming.js` updated.
 - **Supabase free-tier project pausing**: Supabase pauses inactive free-tier projects after ~1 week; DNS for the project URL returns `ERR_NAME_NOT_RESOLVED`. Extension auth fails completely when paused (token refresh breaks, `authedFetch` returns 401 on all `/api/*` calls). Fix: go to supabase.com/dashboard → Restore project (takes ~2 min). Monitor for recurrence — upgrade to pro or keep the project active with a scheduled ping.
 - **Empty transcript guard added**: `runTurn`'s `onText` callback in `offscreen.js` checks for empty pivot+translated text and throws `EMPTY_TRANSCRIPT` (caught like `HALLUCINATED_PIVOT`) to avoid sending empty strings to Sarvam TTS (which returns 400).
+- **Webapp Go Live VAD backport from extension**: `startSilenceDetection` in `App.jsx` brought to parity with the extension's `createVadLoop`. Changes: (1) 16× gain boost node inserted before the analyser so AGC-compressed mic signals are detectable; (2) threshold 10 → 8 (on boosted signal); (3) tick 100ms → 60ms; (4) `dt` cap at 200ms to prevent backgrounded-tab false silence dumps; (5) gap-tolerant accumulator (`GAP_TOLERANCE_MS=600ms`) so inter-word pauses don't reset `activeMs` before arming; (6) `MIN_SPEECH_MS` 400→500ms; (7) no-signal detection warns user after 10s of `peakRms < 0.5`.
+- **`onFinal` fast path added to webapp streaming STT**: `SarvamStreamingSTT` now accepts an `onFinal` callback, fired immediately after `_finalResolve` when Sarvam's transcript arrives. In Go Live mode, `setupStream` wires `onFinal: () => stopRecordingRef.current?.(speaker)` so `stopRecording` is called the moment the transcript is ready — skipping the remaining VAD silence countdown (up to 1500ms saved per turn). In hold-to-speak mode the callback is a no-op (`autoConvRef.current` is false). Guard in `stopRecording` (`recording !== speaker`) prevents double-processing if VAD also fires.
+- **`looksHallucinated` guard added to webapp**: module-level function (same logic as extension's `offscreen.js`) detects when Saaras returns a repetitive hallucination on near-silent audio (>40% of ≥8 words are identical). Solo-mode `onText` throws `HALLUCINATED_PIVOT`; catch block suppresses the error display and restarts Go Live silently.
+- **25-second max recording timer** (`maxRecTimerRef`) added to webapp `startRecording`. Sarvam batch STT rejects audio >30s with HTTP 400. Streaming STT is the primary path (no size limit) but the MediaRecorder batch blob runs in parallel as a fallback for when the WebSocket returns empty. Before this fix, a long recording with a failed WebSocket would trigger a 400 on the batch fallback. Timer fires `stopRecording` at 25s, caps the blob safely under the limit. Cleared immediately in `stopRecording` so normal stops (button release, VAD, `onFinal`) are unaffected. Note: batch path is kept because (a) streaming only covers Indian languages, (b) Groq/OpenAI for intl are always batch, (c) WS can drop.
+- **Benchmarking approach decided**: for comparing vs Google/Apple Translate — latency on fixed audio clips (objective, 1 day effort); STT+translation quality on FLORES-200 sentences rated by bilingual humans (highest value, 1 week); TTS naturalness via blind MOS rating. Key moat: Indian↔Indian pairs and Hinglish/code-switched speech where Google routes through two English hops and Sarvam handles natively.
+- **Product: explicit language selection vs auto-detect**: VaakSetu's per-user language selection is an intentional design for professional/enterprise verticals (call centers, hospitals, courts) where the language pair is known and misdetection is unacceptable. Auto-detect is addable as an optional mode — Sarvam batch STT accepts `language_code: 'unknown'`; the hard part is declaring the target language. Positioning: "fixed-language mode for professional reliability, auto-detect for casual use" — stronger than copying Google's UX.
 
 ## Sarvam Streaming STT Protocol (current, from SDK v1.1.7)
 
@@ -818,6 +825,35 @@ Receive:
 ```
 
 No partial transcripts — one final message per flush. `onPartial` callback never fires.
+
+## Future Implementation Plans
+
+### Static Phrase Library (pre-generated, domain-categorized)
+
+**Concept:** AI-generated common phrases per vertical domain, pre-rendered to TTS audio in all supported languages, stored in Supabase + cached in IndexedDB. After streaming STT gives the English pivot, a cache lookup runs before the full translate+TTS pipeline. On a hit, cached audio plays in ~50ms instead of ~900ms — translate and TTS calls are skipped entirely.
+
+**Domains (V1 scope):** General, Call Center, Medical, Legal, Export/Trade. ~25–30 phrases per domain, 125–150 total.
+
+**Phrase generation:** one-time offline script (`scripts/generate-phrases.js`) — calls Claude API with a domain-specific prompt to produce ~30 short (<12 word) self-contained phrases, then translates each via Mayura (Indian) / Groq Llama (intl) and renders TTS via Bulbul (Indian) / Google TTS (intl). Output: JSON manifest + audio files uploaded to Supabase Storage.
+
+**Why not bundling:** 30 phrases × 5 domains × 29 languages × ~50KB/clip ≈ 200MB. Too large for JS bundle. Instead:
+- **Supabase Postgres** — `phrases` table: `(id, domain, english_canonical, target_lang, translation)`
+- **Supabase Storage** — audio files at `/{domain}/{phraseId}/{targetLang}.mp3`
+- **IndexedDB** — client-side cache; fetch once per domain+language pair at session start, instant on subsequent lookups
+
+**Runtime matching:** exact normalized match on English pivot (lowercase + strip punctuation). Exact is sufficient because phrases are short and specific — a miss just falls through to the full pipeline, no harm done. Fuzzy/semantic matching deferred to V2.
+
+**Domain selection UX decision:** either (A) explicit dropdown at session start so only one domain's audio is prefetched, or (B) load all domains for the active language pair at app start (~7MB total) and skip the selection step. Option B preferred for simplicity.
+
+**Webapp integration points:**
+- `src/lib/phrase-cache.js` — IndexedDB read/write, prefetch, `lookup(normalizedPivot, targetLang)`
+- `stopRecording` in `App.jsx` — after `pivotFromStream` is available, call `lookup()` before dispatching to the pipeline; on hit, play audio and add message directly; on miss, run pipeline as normal
+
+**MVP scope:** Call Center domain only, Hindi↔English pair only. Validate cache hit rate in real conversations before expanding domains and languages.
+
+**Dynamic phrase learning (future V2):** record every successful pivot from real conversations into a candidate store; promote phrases that appear ≥ N times to the hot cache with pre-rendered TTS; background promoter runs on conversation end. The English pivot is the canonical key so the same phrase spoken in any source language maps to the same cache entry.
+
+---
 
 ## Commands
 ```bash
