@@ -125,6 +125,7 @@ export default function App() {
   const conversationEndRef = useRef(null);
   const streamingSTTRef = useRef(null);
   const silenceDetectorRef = useRef(null); // { interval, audioCtx }
+  const maxRecTimerRef = useRef(null);     // guards against >30s recordings (Sarvam batch limit)
   const stopRecordingRef = useRef(null);   // always-current ref for use inside callbacks
   const startRecordingRef = useRef(null);  // always-current ref for auto-restart
   const autoConvRef = useRef(false);       // mirrors autoConversation state for closure safety
@@ -316,6 +317,12 @@ export default function App() {
       recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
       recorder.start(100);
       mediaRecRef.current = recorder;
+
+      // Hard cap: Sarvam batch STT rejects audio > 30s. Auto-stop at 25s so
+      // the blob always lands under the limit, even in noisy Go Live sessions
+      // where VAD fails to arm and the recording would otherwise grow indefinitely.
+      clearTimeout(maxRecTimerRef.current);
+      maxRecTimerRef.current = setTimeout(() => stopRecordingRef.current?.(speaker), 25000);
 
       // Streaming STT (Indian languages only)
       const sourceLang = remoteActive ? langA : (speaker === 'a' ? langA : langB);
@@ -555,6 +562,7 @@ export default function App() {
   const stopRecording = useCallback(async (speaker) => {
     if (!mediaRecRef.current || recording !== speaker) return;
 
+    clearTimeout(maxRecTimerRef.current);
     clearSilenceDetector();
     setRecording(null);
     setProcessing(true);
