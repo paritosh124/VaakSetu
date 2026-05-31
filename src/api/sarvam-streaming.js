@@ -48,11 +48,12 @@ export class SarvamStreamingSTT {
    * @param {string}   [opts.mode]        — 'translate' (→ English) | 'transcribe' (verbatim)
    * @param {Function} [opts.onPartial]   — no-op; kept for interface compatibility (API has no partials)
    */
-  constructor({ apiKey, languageCode, mode = 'translate', onPartial }) {
+  constructor({ apiKey, languageCode, mode = 'translate', onPartial, onFinal }) {
     this.apiKey       = apiKey;
     this.languageCode = languageCode;
     this.mode         = mode;
     this.onPartial    = onPartial; // retained for interface compat — never fires in new API
+    this.onFinal      = onFinal;   // fires immediately when transcript arrives (before stop() is called)
 
     this._ws          = null;
     this._audioCtx    = null;
@@ -105,6 +106,8 @@ export class SarvamStreamingSTT {
       if (msg.type === 'transcript' || msg.type === 'translation') {
         this._result = (msg.text || '').trim();
         this._finalResolve(this._result);
+        // Fire after resolving so stop() called from onFinal sees the result immediately
+        this.onFinal?.(this._result);
       }
     };
 

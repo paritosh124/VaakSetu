@@ -417,9 +417,11 @@ Pending:
 - [ ] Cache TTS for common short phrases
 
 ## Known Issues / Pending
-- [ ] Streaming STT Sarvam protocol assumptions (config format, field names) need validation against actual Sarvam docs once available
 - [ ] Two-phone Go Live: auto-restart timing (350ms gap) may need tuning per device
 - [ ] No TURN servers configured — WebRTC may fail on symmetric NAT (enterprise/VPN networks); would need a paid TURN provider (e.g. Twilio, Metered) for full reliability
+- [ ] Silero VAD model files not bundled — must run `bash extension/scripts/download-silero.sh` manually before neural VAD activates; extension falls back to energy VAD if files absent
+- [ ] Partial transcript display (dashed italic bubble) no longer fires — new Sarvam WS API has no intermediate results, only one final per flush; UI shows "Recording..." until done
+- [ ] Supabase free-tier project pauses after ~1 week of inactivity — extension auth breaks; monitor or upgrade to pro
 
 ## Deployment
 
@@ -780,6 +782,42 @@ No new server-side keys beyond what the webapp uses. The extension's
 - Added `streamer.stop() took Xms` log so latency improvements are directly measurable.
 - Widget now keeps an in-memory `transcript[]` of finalized messages and exposes a **download button** in the header that serializes them to a timestamped `.txt` file.
 - Widget: Go Live button added, PTT disabled while live, partial transcript bubble (dashed italic) updates during streaming, feed made `user-select: text` so conversation is copyable.
+- **Silero VAD Phase 2**: Neural speech-probability VAD (ONNX Runtime Web, Silero v4) added as best-in-class replacement for energy RMS VAD in Go Live mode. Implementation in `extension/lib/api/silero-vad.js`. `loadSileroSession()` loads the shared ONNX session; `SileroVAD` class wraps per-stream AudioWorklet + LSTM inference. Hysteresis thresholds: `START_THRESHOLD=0.5`, `END_THRESHOLD=0.35`, `MIN_SPEECH_MS=300`, `SILENCE_MS=800`. Falls back to energy VAD silently if model files absent. Requires running `bash extension/scripts/download-silero.sh` once to download three binary files (`ort.min.js`, `ort-wasm-simd.wasm`, `silero_vad.onnx`) into `extension/lib/`. CSP updated to `'wasm-unsafe-eval'` for WASM execution. Inline `onerror=` attributes blocked by MV3 CSP — removed from `offscreen.html`.
+- **`receiveFinal()` Phase 1 fast path**: New function in `offscreen.js` fires when streaming STT transcript arrives, bypassing the VAD silence countdown. Uses `cap.finalReceived` flag to prevent double-processing between the fast path and the `endCapture()` fallback. Whichever fires first wins.
+- **Sarvam streaming WS protocol corrected** (5 mismatches vs actual SDK wire format discovered from `sarvamai@1.1.7` npm source):
+  1. **URL path**: `/speech-to-text/streaming` → `/speech-to-text/ws` (transcribe) or `/speech-to-text-translate/ws` (translate)
+  2. **Auth**: `?api-subscription-key=KEY` query param → WebSocket subprotocol `api-subscription-key.<KEY>`
+  3. **Config delivery**: initial JSON message after connect → all config in URL query params (`model`, `sample_rate`, `input_audio_codec=pcm_s16le`, `flush_signal=true`)
+  4. **Audio format**: raw binary Int16 PCM frames → JSON `{ audio: { data: base64(PCM), sample_rate: 16000, encoding: "audio/x-raw" } }`
+  5. **Response format + end-of-stream**: `{ transcript, is_final }` → `{ type: "transcript"/"translation", text: "..." }`; stop by sending `{ type: "flush" }` (not WS close)
+  Mode maps to endpoint path: `mode='translate'` → `/speech-to-text-translate/ws` (no `language-code` param, Sarvam auto-detects Indian source); `mode='transcribe'` → `/speech-to-text/ws?language-code=<code>`. No partial transcripts in the new API — `onPartial` is kept for interface compat but never fires. Both `src/api/sarvam-streaming.js` and `extension/lib/api/sarvam-streaming.js` updated.
+- **Supabase free-tier project pausing**: Supabase pauses inactive free-tier projects after ~1 week; DNS for the project URL returns `ERR_NAME_NOT_RESOLVED`. Extension auth fails completely when paused (token refresh breaks, `authedFetch` returns 401 on all `/api/*` calls). Fix: go to supabase.com/dashboard → Restore project (takes ~2 min). Monitor for recurrence — upgrade to pro or keep the project active with a scheduled ping.
+- **Empty transcript guard added**: `runTurn`'s `onText` callback in `offscreen.js` checks for empty pivot+translated text and throws `EMPTY_TRANSCRIPT` (caught like `HALLUCINATED_PIVOT`) to avoid sending empty strings to Sarvam TTS (which returns 400).
+
+## Sarvam Streaming STT Protocol (current, from SDK v1.1.7)
+
+```
+Connect:  wss://api.sarvam.ai/speech-to-text/ws          (transcribe)
+          wss://api.sarvam.ai/speech-to-text-translate/ws (translate → English)
+          ?model=saaras:v3&sample_rate=16000&input_audio_codec=pcm_s16le&flush_signal=true
+          &language-code=<code>  ← transcribe only; translate auto-detects
+
+Auth:     new WebSocket(url, ['api-subscription-key.<KEY>'])  ← subprotocol, NOT query param
+
+Send audio (per quantum, JSON):
+  { audio: { data: "<base64 Int16 PCM>", sample_rate: 16000, encoding: "audio/x-raw" } }
+
+End stream (instead of closing socket):
+  { type: "flush" }
+
+Receive:
+  { type: "transcript",  text: "..." }  ← transcribe result
+  { type: "translation", text: "..." }  ← translate result
+  { type: "speech_start" }              ← server VAD (if vad_signals=true)
+  { type: "speech_end"   }              ← server VAD (if vad_signals=true)
+```
+
+No partial transcripts — one final message per flush. `onPartial` callback never fires.
 
 ## Commands
 ```bash

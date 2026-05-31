@@ -63,6 +63,19 @@ const VOICES = {
 
 const STEP_ICONS = { stt: '🎤', translate: '🔄', tts: '🔊', playing: '▶️', done: '' };
 
+// Detect Saaras hallucinations on near-silent audio: a single word repeated many times.
+// Rule: if >40% of tokens (>=8 total) are the same word, treat as hallucinated.
+function looksHallucinated(text) {
+  const t = (text || '').trim();
+  if (t.length < 10) return false;
+  const words = t.replace(/[.,!?।॥。;:'"()[\]{}]/g, '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length < 8) return false;
+  const counts = {};
+  for (const w of words) counts[w] = (counts[w] || 0) + 1;
+  const max = Math.max(...Object.values(counts));
+  return max / words.length > 0.4 && max >= 8;
+}
+
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -181,30 +194,78 @@ export default function App() {
   // Amplitude-based VAD: fires stopRecording after SILENCE_MS of quiet following speech
   const startSilenceDetection = useCallback((speaker, stream) => {
     clearSilenceDetector();
-    const SILENCE_THRESHOLD = 10; // RMS on 0–128 scale
-    const SILENCE_MS = 1500;
-    const MIN_SPEECH_MS = 400;   // ignore silence until this much speech recorded
-    const TICK = 100;
+    // Thresholds match the extension's tuned energy VAD (after 16× gain boost).
+    // noise floor ~1.3, normal speech ~14-20 on the boosted signal.
+    const SILENCE_THRESHOLD  = 8;    // RMS threshold on boosted signal
+    const SILENCE_MS         = 1500; // sustained silence to end turn
+    const MIN_SPEECH_MS      = 500;  // accumulated active time to arm
+    const GAP_TOLERANCE_MS   = 600;  // brief inter-word dips don't reset the accumulator
+    const TICK               = 60;   // ms between ticks (faster = tighter silence detection)
+    const NO_SIGNAL_WARN_MS  = 10000;
+    const NO_SIGNAL_RMS_THRESHOLD = 0.5;
 
     const audioCtx = new AudioContext();
+    // Boost the mic signal 16× before analysis — AGC-compressed signals can be
+    // too quiet to cross the threshold without this. MediaRecorder taps the raw
+    // stream so recorded audio is unaffected.
+    const src    = audioCtx.createMediaStreamSource(stream);
+    const boost  = audioCtx.createGain();
+    boost.gain.value = 16;
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;
-    audioCtx.createMediaStreamSource(stream).connect(analyser);
-    const data = new Uint8Array(analyser.fftSize);
+    // Muted terminus keeps the subgraph alive in Chromium (pruned otherwise).
+    const mute = audioCtx.createGain();
+    mute.gain.value = 0;
+    src.connect(boost);
+    boost.connect(analyser);
+    analyser.connect(mute);
+    mute.connect(audioCtx.destination);
 
-    let speechMs = 0;
-    let silenceMs = 0;
+    const data = new Uint8Array(analyser.fftSize);
+    let activeMs = 0;
+    let silentMs = 0;
+    let armed    = false;
+    let lastTickAt    = Date.now();
+    let lastDebugAt   = Date.now();
+    let peakRms       = 0;
+    let noSignalMs    = 0;
+    let warnedNoSignal = false;
 
     const interval = setInterval(() => {
-      analyser.getByteTimeDomainData(data);
-      const rms = Math.sqrt(data.reduce((s, v) => s + (v - 128) ** 2, 0) / data.length);
+      const now = Date.now();
+      // Cap dt so a backgrounded tab can't dump a huge silent delta.
+      const dt = Math.min(200, now - lastTickAt);
+      lastTickAt = now;
 
-      if (rms >= SILENCE_THRESHOLD) {
-        speechMs += TICK;
-        silenceMs = 0;
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) { const v = data[i] - 128; sum += v * v; }
+      const rms = Math.sqrt(sum / data.length);
+      peakRms = Math.max(peakRms, rms);
+
+      // No-signal check every 2s — warn if mic appears dead
+      if (now - lastDebugAt >= 2000) {
+        if (peakRms < NO_SIGNAL_RMS_THRESHOLD) noSignalMs += (now - lastDebugAt);
+        else noSignalMs = 0;
+        if (!warnedNoSignal && noSignalMs >= NO_SIGNAL_WARN_MS) {
+          warnedNoSignal = true;
+          setError('No microphone signal detected. Check your mic is connected and not muted.');
+        }
+        lastDebugAt = now;
+        peakRms = 0;
+      }
+
+      const active = rms >= SILENCE_THRESHOLD;
+      if (active) {
+        activeMs += dt;
+        silentMs = 0;
+        if (!armed && activeMs >= MIN_SPEECH_MS) armed = true;
       } else {
-        silenceMs += TICK;
-        if (speechMs >= MIN_SPEECH_MS && silenceMs >= SILENCE_MS) {
+        silentMs += dt;
+        if (!armed) {
+          // Tolerate brief inter-word pauses; only reset when silence is sustained.
+          if (silentMs > GAP_TOLERANCE_MS) activeMs = 0;
+        } else if (silentMs >= SILENCE_MS) {
           clearInterval(interval);
           audioCtx.close().catch(() => {});
           silenceDetectorRef.current = null;
@@ -266,6 +327,9 @@ export default function App() {
           languageCode: sourceLang,
           mode: sttMode,
           onPartial: (text) => setPartialTranscript(text),
+          // In Go Live mode, fire stopRecording immediately when Sarvam's transcript
+          // arrives — skips waiting for the full SILENCE_MS VAD countdown (~1.5s saved).
+          onFinal: () => { if (autoConvRef.current) stopRecordingRef.current?.(speaker); },
         });
         streamer.start(stream).catch(() => { streamingSTTRef.current = null; });
         streamingSTTRef.current = streamer;
@@ -590,6 +654,7 @@ export default function App() {
 
     const onStep = (id, msg) => { setStepId(id); setStepMsg(msg); };
     const onText = (pivotText, translatedText) => {
+      if (looksHallucinated(pivotText)) throw new Error('HALLUCINATED_PIVOT');
       setMessages((prev) => [
         ...prev,
         { id: messageId, speaker, sourceLabel, targetLabel, pivotText, translatedText, sourceLang, targetLang },
@@ -658,7 +723,8 @@ export default function App() {
         }
       });
     } catch (err) {
-      setError(err.message);
+      // Hallucinated pivot: drop silently — don't show noise to the user
+      if (err.message !== 'HALLUCINATED_PIVOT') setError(err.message);
       setProcessing(false);
       setStepId('');
       setStepMsg('');
