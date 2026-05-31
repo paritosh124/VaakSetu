@@ -53,10 +53,12 @@ export function LandingPage() {
         .vs-grid-3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 20px; }
         .vs-grid-2 { display: grid; grid-template-columns: repeat(2,1fr); gap: 24px; }
         .vs-grid-features { display: grid; grid-template-columns: repeat(3,1fr); gap: 20px; }
+        .vs-grid-solutions { display: grid; grid-template-columns: repeat(2,1fr); gap: 24px; }
         @media (max-width: 768px) {
           .vs-grid-3 { grid-template-columns: 1fr; }
           .vs-grid-2 { grid-template-columns: 1fr; }
           .vs-grid-features { grid-template-columns: 1fr; }
+          .vs-grid-solutions { grid-template-columns: 1fr; }
           .vs-hero-btns { flex-direction: column; align-items: stretch !important; }
           .vs-hero-btns a, .vs-hero-btns button { text-align: center; }
           .vs-section { padding: 60px 20px; }
@@ -154,38 +156,127 @@ export function LandingPage() {
         </div>
       </section>
 
-      {/* ── Solution ─────────────────────────────────────────── */}
-      <section className="vs-section" style={{ textAlign: 'center' }}>
-        <div style={{ display: 'inline-block', background: 'rgba(245,166,35,0.1)', color: C.amber, padding: '6px 16px', borderRadius: 20, fontSize: 13, fontWeight: 500, marginBottom: 24, border: `1px solid rgba(245,166,35,0.2)` }}>
-          How it works
+      {/* ── Solutions ────────────────────────────────────────── */}
+      <section className="vs-section">
+        <div style={{ textAlign: 'center', marginBottom: 56 }}>
+          <div style={{ display: 'inline-block', background: 'rgba(245,166,35,0.1)', color: C.amber, padding: '6px 16px', borderRadius: 20, fontSize: 13, fontWeight: 500, marginBottom: 24, border: `1px solid rgba(245,166,35,0.2)` }}>
+            Four Ways to Break the Barrier
+          </div>
+          <h2 style={{ fontFamily: '"Crimson Pro", serif', fontSize: 'clamp(28px, 4vw, 44px)', fontWeight: 700, marginBottom: 16 }}>
+            VaakSetu removes the barrier.<br /><span style={{ color: C.teal }}>The relationship stays.</span>
+          </h2>
+          <p style={{ color: C.muted, fontSize: 17, maxWidth: 580, margin: '0 auto', lineHeight: 1.7 }}>
+            Speak in Hindi. Your buyer hears Japanese. They respond in Japanese. You hear Hindi.
+            Live. No delays. No interpreter — however your team communicates.
+          </p>
         </div>
-        <h2 style={{ fontFamily: '"Crimson Pro", serif', fontSize: 'clamp(28px, 4vw, 44px)', fontWeight: 700, marginBottom: 20 }}>
-          VaakSetu removes the barrier.<br /><span style={{ color: C.teal }}>The relationship stays.</span>
-        </h2>
-        <p style={{ color: C.muted, fontSize: 17, maxWidth: 620, margin: '0 auto 56px', lineHeight: 1.7 }}>
-          Speak in Hindi. Your buyer hears Japanese. They respond in Japanese. You hear Hindi.
-          Live. No delays. No interpreter. No awkward pauses.
-        </p>
 
-        {/* 3-step flow */}
-        <div className="vs-grid-3" style={{ textAlign: 'left', marginBottom: 56 }}>
-          {[
-            { num: '01', title: 'Open VaakSetu', body: 'On your phone or laptop. No download, no installation — works in any browser.' },
-            { num: '02', title: 'Share a link', body: 'Your buyer or customer joins from their device, anywhere in the world.' },
-            { num: '03', title: 'Speak naturally', body: 'VaakSetu translates both sides in real time. You both hear your own language.' },
-          ].map(({ num, title, body }) => (
-            <div key={num} className="vs-card" style={{ position: 'relative', overflow: 'hidden' }}>
-              <div style={{ fontFamily: '"Crimson Pro", serif', fontSize: 64, fontWeight: 700, color: 'rgba(245,166,35,0.08)', position: 'absolute', top: -8, right: 16, lineHeight: 1 }}>{num}</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: C.amber, marginBottom: 10, letterSpacing: '0.06em' }}>{num}</div>
-              <h3 style={{ fontFamily: '"Crimson Pro", serif', fontSize: 21, fontWeight: 600, marginBottom: 10 }}>{title}</h3>
-              <p style={{ color: C.muted, fontSize: 15, lineHeight: 1.6 }}>{body}</p>
+        <div className="vs-grid-solutions">
+          {/* 1 — Phone Call */}
+          <div className="vs-card" style={{ borderTop: `3px solid #6C7AE0`, display: 'flex', flexDirection: 'column', gap: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+              <div style={{ fontSize: 36 }}>📞</div>
+              <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', background: 'rgba(108,122,224,0.15)', color: '#6C7AE0', padding: '3px 10px', borderRadius: 20, border: '1px solid rgba(108,122,224,0.3)' }}>COMING SOON</span>
             </div>
-          ))}
-        </div>
+            <h3 style={{ fontFamily: '"Crimson Pro", serif', fontSize: 22, fontWeight: 700, marginBottom: 10 }}>PSTN Bridge</h3>
+            <p style={{ fontSize: 14, fontWeight: 600, color: '#6C7AE0', marginBottom: 12 }}>Just call. No app. No link. No setup.</p>
+            <p style={{ color: C.muted, fontSize: 15, lineHeight: 1.7, flex: 1 }}>
+              Your customer dials a regular phone number. They speak their language.
+              Your team hears theirs — live, in real time. Zero technology required on the customer's side.
+              Perfect for rural customers, elderly users, and anyone who just wants to make a normal call.
+            </p>
+            <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {['Regular phone call — no smartphone needed','Works for inbound and outbound calls','Ideal for banks, government services, rural reach'].map(pt => (
+                <div key={pt} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <span style={{ color: '#6C7AE0', flexShrink: 0, marginTop: 2 }}>✓</span>
+                  <span style={{ color: C.muted, fontSize: 13 }}>{pt}</span>
+                </div>
+              ))}
+            </div>
+            <a className="vs-btn-outline" style={{ marginTop: 24, textAlign: 'center', fontSize: 14, padding: '10px 20px' }} href={`mailto:${DEMO_EMAIL}?subject=PSTN Bridge — Early Access Request`}>
+              Request Early Access
+            </a>
+          </div>
 
-        <button className="vs-btn-primary" style={{ fontSize: 16, padding: '15px 40px' }} onClick={() => navigate('/app')}>
-          See It In Action →
-        </button>
+          {/* 2 — Extension */}
+          <div className="vs-card" style={{ borderTop: `3px solid ${C.teal}`, display: 'flex', flexDirection: 'column', gap: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+              <div style={{ fontSize: 36 }}>🎧</div>
+              <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', background: 'rgba(15,184,169,0.15)', color: C.teal, padding: '3px 10px', borderRadius: 20, border: `1px solid rgba(15,184,169,0.3)` }}>LIVE</span>
+            </div>
+            <h3 style={{ fontFamily: '"Crimson Pro", serif', fontSize: 22, fontWeight: 700, marginBottom: 10 }}>Browser Extension</h3>
+            <p style={{ fontSize: 14, fontWeight: 600, color: C.teal, marginBottom: 12 }}>Works inside Google Meet, Zoom & WhatsApp.</p>
+            <p style={{ color: C.muted, fontSize: 15, lineHeight: 1.7, flex: 1 }}>
+              Install the extension once. It overlays a live translation layer on top of any online call —
+              without the other side installing anything. Your agent hears the customer in their language
+              and responds naturally. No switching tabs. No interrupting the call.
+            </p>
+            <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {['Works on Google Meet, Zoom, WhatsApp Web','No setup needed for the customer','Built for call center agents and remote teams'].map(pt => (
+                <div key={pt} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <span style={{ color: C.teal, flexShrink: 0, marginTop: 2 }}>✓</span>
+                  <span style={{ color: C.muted, fontSize: 13 }}>{pt}</span>
+                </div>
+              ))}
+            </div>
+            <a className="vs-btn-outline" style={{ marginTop: 24, textAlign: 'center', fontSize: 14, padding: '10px 20px', borderColor: 'rgba(15,184,169,0.4)', color: C.teal }} href={`mailto:${DEMO_EMAIL}?subject=Extension Demo Request`}>
+              Book a Demo
+            </a>
+          </div>
+
+          {/* 3 — Web App */}
+          <div className="vs-card" style={{ borderTop: `3px solid ${C.amber}`, display: 'flex', flexDirection: 'column', gap: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+              <div style={{ fontSize: 36 }}>📱</div>
+              <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', background: 'rgba(245,166,35,0.15)', color: C.amber, padding: '3px 10px', borderRadius: 20, border: `1px solid rgba(245,166,35,0.3)` }}>LIVE</span>
+            </div>
+            <h3 style={{ fontFamily: '"Crimson Pro", serif', fontSize: 22, fontWeight: 700, marginBottom: 10 }}>Web App</h3>
+            <p style={{ fontSize: 14, fontWeight: 600, color: C.amber, marginBottom: 12 }}>Share a link. Both phones. Start talking.</p>
+            <p style={{ color: C.muted, fontSize: 15, lineHeight: 1.7, flex: 1 }}>
+              Open VaakSetu on your phone. Share a link with your buyer or customer.
+              They open it on their phone. Both of you speak your own language and hear theirs — live.
+              No account, no download. Works anywhere with internet.
+            </p>
+            <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {['No app install — works in any browser','Two-phone mode for face-to-face or remote conversations','Ideal for export negotiations and field sales'].map(pt => (
+                <div key={pt} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <span style={{ color: C.amber, flexShrink: 0, marginTop: 2 }}>✓</span>
+                  <span style={{ color: C.muted, fontSize: 13 }}>{pt}</span>
+                </div>
+              ))}
+            </div>
+            <button className="vs-btn-primary" style={{ marginTop: 24, fontSize: 14, padding: '10px 20px' }} onClick={() => navigate('/app')}>
+              Try It Free →
+            </button>
+          </div>
+
+          {/* 4 — API */}
+          <div className="vs-card" style={{ borderTop: `3px solid #9B7AE0`, display: 'flex', flexDirection: 'column', gap: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+              <div style={{ fontSize: 36 }}>⚙️</div>
+              <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', background: 'rgba(155,122,224,0.15)', color: '#9B7AE0', padding: '3px 10px', borderRadius: 20, border: '1px solid rgba(155,122,224,0.3)' }}>COMING SOON</span>
+            </div>
+            <h3 style={{ fontFamily: '"Crimson Pro", serif', fontSize: 22, fontWeight: 700, marginBottom: 10 }}>Enterprise API</h3>
+            <p style={{ fontSize: 14, fontWeight: 600, color: '#9B7AE0', marginBottom: 12 }}>Build language into your product.</p>
+            <p style={{ color: C.muted, fontSize: 15, lineHeight: 1.7, flex: 1 }}>
+              Embed real-time multilingual communication directly into your CRM, dialer,
+              or customer platform via REST API. Full control over workflows, custom voice models,
+              usage analytics, and dedicated support. Built for enterprises that need language
+              intelligence at scale.
+            </p>
+            <div style={{ marginTop: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {['REST API with SDKs for Python, Node, and Java','Custom voice models for your domain and language pair','SLA-backed uptime, dedicated onboarding, usage analytics'].map(pt => (
+                <div key={pt} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <span style={{ color: '#9B7AE0', flexShrink: 0, marginTop: 2 }}>✓</span>
+                  <span style={{ color: C.muted, fontSize: 13 }}>{pt}</span>
+                </div>
+              ))}
+            </div>
+            <a className="vs-btn-outline" style={{ marginTop: 24, textAlign: 'center', fontSize: 14, padding: '10px 20px' }} href={`mailto:${DEMO_EMAIL}?subject=Enterprise API — Early Access`}>
+              Request API Access
+            </a>
+          </div>
+        </div>
       </section>
 
       {/* ── Verticals ────────────────────────────────────────── */}
