@@ -74,8 +74,11 @@ export async function sttToEnglish({ audio, sourceLang }) {
 
 async function sarvamSTT({ audio, languageCode, mode }) {
   const fd = new FormData();
-  const ext = audio.mime.includes('wav') ? 'wav' : audio.mime.includes('mp4') ? 'm4a' : 'webm';
-  fd.append('file', new Blob([audio.buffer], { type: audio.mime }), `audio.${ext}`);
+  // Strip ';codecs=opus' etc — Sarvam rejects 'audio/mp4;codecs=opus' though it
+  // accepts the bare 'audio/mp4'. (Same fix as the webapp's batch path.)
+  const mime = (audio.mime || 'audio/webm').split(';')[0];
+  const ext = mime.includes('wav') ? 'wav' : mime.includes('mp4') ? 'm4a' : 'webm';
+  fd.append('file', new Blob([audio.buffer], { type: mime }), `audio.${ext}`);
   fd.append('model', 'saaras:v3');
   fd.append('mode', mode);
   fd.append('language_code', toSTTCode(languageCode));
@@ -92,8 +95,9 @@ async function sarvamSTT({ audio, languageCode, mode }) {
 
 async function groqTranscribe({ audio, sourceLang }) {
   const fd = new FormData();
-  const ext = audio.mime.includes('wav') ? 'wav' : audio.mime.includes('mp4') ? 'm4a' : 'webm';
-  fd.append('file', new Blob([audio.buffer], { type: audio.mime }), `audio.${ext}`);
+  const mime = (audio.mime || 'audio/webm').split(';')[0];
+  const ext = mime.includes('wav') ? 'wav' : mime.includes('mp4') ? 'm4a' : 'webm';
+  fd.append('file', new Blob([audio.buffer], { type: mime }), `audio.${ext}`);
   fd.append('model', 'whisper-large-v3');
   fd.append('response_format', 'json');
   if (sourceLang) fd.append('language', sourceLang.split('-')[0]); // ISO-639-1
