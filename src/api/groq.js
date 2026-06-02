@@ -83,7 +83,7 @@ export async function groqTranslate({ text, targetLangName, apiKey }) {
 /**
  * Browser-native TTS via Web Speech API — free, no API key.
  * Acceptable for European languages on desktop Chrome.
- * NOT recommended for Japanese, Chinese, Arabic, Korean — use ElevenLabs instead.
+ * NOT recommended for Japanese, Chinese, Arabic, Korean — use Google TTS instead.
  * Does NOT return audio data — replay button is unavailable for these messages.
  */
 export function browserTTS({ text, languageCode, voiceGender = 'male' }) {

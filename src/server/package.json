@@ -1,0 +1,21 @@
+{
+  "name": "vaaksetu-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent WebSocket relay for VaakSetu Meeting Bot (and later PSTN Bridge). Deployed separately from the Vercel frontend (Render free tier for POC).",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@livekit/rtc-node": "^0.13.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^4.19.2",
+    "livekit-server-sdk": "^2.9.0",
+    "ws": "^8.18.0"
+  }
+}

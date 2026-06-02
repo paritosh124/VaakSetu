@@ -218,10 +218,10 @@ export async function openaiEnglishToSpeech({
   return { pivotText, translatedText, audioB64, audioPromise };
 }
 
-// ─── Groq + ElevenLabs pipeline (international languages, cheaper) ────────────
+// ─── Groq + Google TTS pipeline (international languages) ────────────────────
 
 /**
- * Full Groq+ElevenLabs pipeline: Groq Whisper STT → Llama translate → ElevenLabs TTS
+ * Full Groq+Google TTS pipeline: Groq Whisper STT → Llama translate → Google Cloud TTS
  * Same interface as runOpenAIPipeline — drop-in replacement.
  */
 export async function runGroqPipeline({
@@ -274,7 +274,7 @@ export async function groqSpeechToEnglishPipeline({ audioBlob, groqKey, sourceLa
 }
 
 /**
- * Receiver half for remote mode — Groq translate → ElevenLabs TTS.
+ * Receiver half for remote mode — Groq translate → Google Cloud TTS.
  */
 export async function groqEnglishToSpeech({
   pivotText,

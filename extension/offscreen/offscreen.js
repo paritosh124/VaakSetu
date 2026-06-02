@@ -495,15 +495,22 @@ async function beginCapture(who) {
   // Lock taken — defer to the active speaker UNLESS the new arrival is
   // dramatically louder (rare; signals the lock-holder is actually echo).
   if (turnLock) {
-    const myRms    = vadLoops[who]?.rms?.()                    ?? 0;
-    const heldRms  = vadLoops[activeCapture?.who]?.rms?.()     ?? 0;
+    // If there's no active capture (we're in the translate/TTS phase of runTurn),
+    // there's nothing to compare RMS against — always ignore the new VAD event.
+    // Without this guard, heldRms=0 so any positive signal would "hijack" and
+    // start a new capture while TTS is still playing, causing a stuck state.
+    if (!activeCapture) return;
+
+    const myRms    = vadLoops[who]?.rms?.()                ?? 0;
+    const heldRms  = vadLoops[activeCapture.who]?.rms?.()  ?? 0;
     if (myRms < heldRms * CROSSTALK_RMS_DOMINANCE) {
       return;
     }
-    console.log(`[vaaksetu cross-talk] hijack: ${activeCapture?.who} → ${who} (heldRms=${heldRms.toFixed(1)}, newRms=${myRms.toFixed(1)})`);
+    console.log(`[vaaksetu cross-talk] hijack: ${activeCapture.who} → ${who} (heldRms=${heldRms.toFixed(1)}, newRms=${myRms.toFixed(1)})`);
     // Release current capture without processing — it was probably echo.
-    try { await activeCapture?.streamer?.destroy?.(); } catch {}
-    try { activeCapture?.mediaRecorder?.stop?.(); } catch {}
+    clearTimeout(activeCapture.safetyTimer);
+    try { await activeCapture.streamer?.destroy?.(); } catch {}
+    try { activeCapture.mediaRecorder?.stop?.(); } catch {}
     activeCapture = null;
   }
 
@@ -521,6 +528,7 @@ async function beginCapture(who) {
     streamer: null, mediaRecorder: null, parts: [],
     blobPromise: null, blobResolve: null,
     finalReceived: false, // set true when onFinal fires — prevents endCapture double-run
+    safetyTimer: null,    // force-ends turn if streaming is unavailable and VAD misfires
     startedAt: Date.now(),
   };
   activeCapture = cap;
@@ -561,6 +569,16 @@ async function beginCapture(who) {
       cap.streamer = null;
     }
   }
+
+  // Safety timer: if streaming is unavailable (intl source or key failure), the
+  // turn can only end via VAD silence. If VAD misfires or the environment is
+  // noisy, cap the turn at 20s so the turn lock is never held indefinitely.
+  if (!cap.streamer) {
+    cap.safetyTimer = setTimeout(() => {
+      console.warn(`[vaaksetu] safety timer fired for ${who} — forcing endCapture`);
+      endCapture(who);
+    }, 20000);
+  }
 }
 
 // Fast path: fires when Sarvam's server VAD detects speech_end and the
@@ -569,6 +587,7 @@ async function receiveFinal(who, transcript) {
   const cap = activeCapture;
   if (!cap || cap.who !== who || !goLive || cap.finalReceived) return;
   cap.finalReceived = true;
+  clearTimeout(cap.safetyTimer);
   activeCapture = null;
   console.log(`[vaaksetu] receiveFinal for ${who}: "${transcript.slice(0, 60)}"`);
   // Clean up the streamer and recorder — we have what we need.
@@ -585,6 +604,7 @@ async function endCapture(who) {
   const cap = activeCapture;
   if (!cap || cap.who !== who || !goLive) return; // stale event
   if (cap.finalReceived) return;                   // already handled by receiveFinal
+  clearTimeout(cap.safetyTimer);
   activeCapture = null;
 
   const endedAt = Date.now();

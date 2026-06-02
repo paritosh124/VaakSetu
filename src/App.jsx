@@ -88,13 +88,11 @@ export default function App() {
   const storedKey = !isProd && typeof localStorage !== 'undefined' ? localStorage.getItem('sarvam_key') || '' : '';
   const storedOAIKey     = !isProd ? localStorage.getItem('openai_key')     || '' : '';
   const storedGroqKey    = !isProd ? localStorage.getItem('groq_key')       || '' : '';
-  const storedELKey      = !isProd ? localStorage.getItem('elevenlabs_key') || '' : '';
   // Prefer .env value; only fall back to localStorage if .env value is absent (undefined), not if it's intentionally empty ('')
   const envOr = (envVal, stored) => (envVal !== undefined && envVal !== '' ? envVal : stored);
-  const [apiKey,        setApiKey]        = useState(isProd ? '' : envOr(import.meta.env.VITE_SARVAM_API_KEY,     storedKey));
-  const [openaiKey,     setOpenaiKey]     = useState(isProd ? '' : envOr(import.meta.env.VITE_OPENAI_API_KEY,     storedOAIKey));
-  const [groqKey,       setGroqKey]       = useState(isProd ? '' : envOr(import.meta.env.VITE_GROQ_API_KEY,       storedGroqKey));
-  const [elevenLabsKey, setElevenLabsKey] = useState(isProd ? '' : envOr(import.meta.env.VITE_ELEVENLABS_API_KEY, storedELKey));
+  const [apiKey,    setApiKey]    = useState(isProd ? '' : envOr(import.meta.env.VITE_SARVAM_API_KEY, storedKey));
+  const [openaiKey, setOpenaiKey] = useState(isProd ? '' : envOr(import.meta.env.VITE_OPENAI_API_KEY, storedOAIKey));
+  const [groqKey,   setGroqKey]   = useState(isProd ? '' : envOr(import.meta.env.VITE_GROQ_API_KEY,   storedGroqKey));
   const [showSetup, setShowSetup] = useState(!isProd && !apiKey);
 
   const fixLang = (v) => (v === 'od-IN' ? 'or-IN' : v); // migrate old Odia code
@@ -130,8 +128,20 @@ export default function App() {
   const startRecordingRef = useRef(null);  // always-current ref for auto-restart
   const autoConvRef = useRef(false);       // mirrors autoConversation state for closure safety
 
-  // Key used for WebSocket streaming — must be client-side (visible in devtools)
-  const streamKey = import.meta.env.VITE_SARVAM_API_KEY || apiKey;
+  // Key used for WebSocket streaming — must be client-side (visible in devtools).
+  // Initialised from build-time env var; falls back to server fetch in prod when
+  // VITE_SARVAM_API_KEY isn't baked in, or to apiKey (setup screen) in dev.
+  const [streamKey, setStreamKey] = useState(import.meta.env.VITE_SARVAM_API_KEY || '');
+  useEffect(() => {
+    if (streamKey) return;
+    if (!isProd && apiKey) { setStreamKey(apiKey); return; }
+    if (isProd) {
+      fetch('/api/stream-key')
+        .then((r) => r.ok ? r.json() : null)
+        .then((d) => { if (d?.key) setStreamKey(d.key); })
+        .catch(() => {});
+    }
+  }, [apiKey, streamKey]);
 
   const [partialTranscript, setPartialTranscript] = useState('');
   const [autoConversation, setAutoConversation] = useState(false);
@@ -160,15 +170,13 @@ export default function App() {
     return () => document.removeEventListener('contextmenu', block);
   }, []);
 
-  const handleSaveKey = (sarvamKey, oaiKey, gKey, elKey) => {
+  const handleSaveKey = (sarvamKey, oaiKey, gKey) => {
     setApiKey(sarvamKey);
     setOpenaiKey(oaiKey);
     setGroqKey(gKey);
-    setElevenLabsKey(elKey);
-    try { localStorage.setItem('sarvam_key',     sarvamKey); } catch {}
-    try { localStorage.setItem('openai_key',     oaiKey);    } catch {}
-    try { localStorage.setItem('groq_key',       gKey);      } catch {}
-    try { localStorage.setItem('elevenlabs_key', elKey);     } catch {}
+    try { localStorage.setItem('sarvam_key', sarvamKey); } catch {}
+    try { localStorage.setItem('openai_key', oaiKey);    } catch {}
+    try { localStorage.setItem('groq_key',   gKey);      } catch {}
     setShowSetup(false);
   };
 
@@ -191,6 +199,23 @@ export default function App() {
       silenceDetectorRef.current = null;
     }
   }, []);
+
+  // Stop recording immediately WITHOUT triggering the STT pipeline.
+  // Called when a partner message arrives mid-recording in Go Live mode so the
+  // TTS playback doesn't echo back through the mic and create a feedback loop.
+  const abortRecording = useCallback(() => {
+    if (!mediaRecRef.current) return;
+    clearTimeout(maxRecTimerRef.current);
+    clearSilenceDetector();
+    streamingSTTRef.current?.destroy();
+    streamingSTTRef.current = null;
+    try { mediaRecRef.current.stop(); } catch {}
+    mediaRecRef.current = null;
+    chunksRef.current = [];
+    setRecording(null);
+  }, [clearSilenceDetector]);
+  const abortRecordingRef = useRef(abortRecording);
+  useEffect(() => { abortRecordingRef.current = abortRecording; });
 
   // Amplitude-based VAD: fires stopRecording after SILENCE_MS of quiet following speech
   const startSilenceDetection = useCallback((speaker, stream) => {
@@ -376,6 +401,10 @@ export default function App() {
     }
     if (msg.type !== 'english' || !msg.text) return;
 
+    // Go Live: abort our recording before playing partner's TTS so the
+    // speaker audio doesn't echo back through the mic and trigger a spurious turn.
+    if (autoConvRef.current) abortRecordingRef.current?.();
+
     const messageId = Date.now();
     const srcLang = getLang(msg.sourceLang || 'en-IN');
     const tgtLang = getLang(langA);
@@ -458,7 +487,7 @@ export default function App() {
         setTimeout(() => startRecordingRef.current?.('a'), 800);
       }
     }
-  }, [langA, voiceA, apiKey, openaiKey, groqKey, elevenLabsKey]);
+  }, [langA, voiceA, apiKey, openaiKey, groqKey]);
 
   // Keep latest handler in a ref so PeerJS callbacks always see fresh state
   useEffect(() => { partnerHandlerRef.current = handlePartnerMessage; }, [handlePartnerMessage]);
@@ -741,10 +770,10 @@ export default function App() {
         setTimeout(() => startRecordingRef.current?.('a'), 800);
       }
     }
-  }, [recording, remoteActive, langA, langB, voiceA, voiceB, apiKey, openaiKey, groqKey, elevenLabsKey, streamKey, clearSilenceDetector, peerState]);
+  }, [recording, remoteActive, langA, langB, voiceA, voiceB, apiKey, openaiKey, groqKey, streamKey, clearSilenceDetector, peerState]);
 
   if (showSetup) {
-    return <SetupScreen onSave={handleSaveKey} existingKey={apiKey} existingOaiKey={openaiKey} existingGroqKey={groqKey} existingELKey={elevenLabsKey} />;
+    return <SetupScreen onSave={handleSaveKey} existingKey={apiKey} existingOaiKey={openaiKey} existingGroqKey={groqKey} />;
   }
 
   const partnerLangInfo = getLang(partnerLang || 'hi-IN');
@@ -1208,14 +1237,13 @@ function RemoteModal({ mode, peerState, roomCode, joinCodeInput, remoteError, on
 }
 
 // ─── Setup / API Key Screen ──────────────────────────────────────────────────
-function SetupScreen({ onSave, existingKey, existingOaiKey, existingGroqKey, existingELKey }) {
+function SetupScreen({ onSave, existingKey, existingOaiKey, existingGroqKey }) {
   const [key,    setKey]    = useState(existingKey    || '');
   const [oaiKey, setOaiKey] = useState(existingOaiKey || '');
   const [gKey,   setGKey]   = useState(existingGroqKey || '');
-  const [elKey,  setElKey]  = useState(existingELKey  || '');
   const valid = key.trim().length > 20;
 
-  const save = () => valid && onSave(key.trim(), oaiKey.trim(), gKey.trim(), elKey.trim());
+  const save = () => valid && onSave(key.trim(), oaiKey.trim(), gKey.trim());
 
   return (
     <div style={s.setupRoot}>
@@ -1242,16 +1270,8 @@ function SetupScreen({ onSave, existingKey, existingOaiKey, existingGroqKey, exi
           {' '}— Whisper STT + Llama translate. Free tier available.
         </p>
 
-        {/* ElevenLabs — recommended for intl TTS */}
-        <label style={{ ...s.setupLabel, marginTop: 10 }}>ElevenLabs API Key <span style={{ color: COLORS.muted }}>optional — better voice quality</span></label>
-        <input style={s.setupInput} type="password" placeholder="sk_…" value={elKey} onChange={(e) => setElKey(e.target.value)} />
-        <p style={s.setupHint}>
-          <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noreferrer" style={{ color: COLORS.teal }}>elevenlabs.io</a>
-          {' '}— Natural TTS in 32 languages. Free tier: 10k chars/month.
-        </p>
-
         {/* OpenAI — fallback */}
-        <label style={{ ...s.setupLabel, marginTop: 10 }}>OpenAI API Key <span style={{ color: COLORS.muted }}>fallback if no Groq/ElevenLabs</span></label>
+        <label style={{ ...s.setupLabel, marginTop: 10 }}>OpenAI API Key <span style={{ color: COLORS.muted }}>fallback if no Groq</span></label>
         <input
           style={s.setupInput}
           type="password"

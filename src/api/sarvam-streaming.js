@@ -150,7 +150,7 @@ export class SarvamStreamingSTT {
    * @param {number} [timeoutMs=2000]
    * @returns {Promise<string>}
    */
-  async stop(timeoutMs = 2000) {
+  async stop(timeoutMs = 1500) {
     this._stopped = true;
 
     try { this._sourceNode?.disconnect(); } catch {}

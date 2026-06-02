@@ -7,10 +7,12 @@ import { AuthGate } from './auth/AuthGate.jsx';
 import { AuthBadge } from './auth/AuthBadge.jsx';
 import { CodeGate } from './auth/CodeGate.jsx';
 import { ConnectExtensionPage } from './auth/ConnectExtensionPage.jsx';
+import { MeetingBotPage } from './MeetingBotPage.jsx';
 
 // Tiny path-based router.
 // /                   → LandingPage (marketing)
 // /app                → translator tool (AuthGate wrapped)
+// /meeting            → Meeting Bot agent console (AuthGate wrapped)
 // /connect-extension  → extension pairing page
 function Root() {
   const path = window.location.pathname;
@@ -20,6 +22,16 @@ function Root() {
       <CodeGate>
         <AuthGate>
           <App />
+          <AuthBadge />
+        </AuthGate>
+      </CodeGate>
+    );
+  }
+  if (path === '/meeting' || path === '/meeting/') {
+    return (
+      <CodeGate>
+        <AuthGate>
+          <MeetingBotPage />
           <AuthBadge />
         </AuthGate>
       </CodeGate>

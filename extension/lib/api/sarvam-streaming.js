@@ -162,7 +162,7 @@ export class SarvamStreamingSTT {
   }
 
   // Send flush → wait for transcript. maxWaitMs is the fallback timeout.
-  async stop(maxWaitMs = 2000) {
+  async stop(maxWaitMs = 1500) {
     this._stopped = true;
 
     try { this._sourceNode?.disconnect(); } catch {}

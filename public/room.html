@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VaakSetu — Live Translation Call</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #0C0B1A; color: #EDEBF5;
+           display: flex; min-height: 100vh; align-items: center; justify-content: center; }
+    .card { max-width: 420px; padding: 32px; text-align: center; }
+    h1 { font-size: 24px; margin-bottom: 8px; }
+    p { color: #A9A6BE; line-height: 1.5; }
+    button { margin-top: 20px; padding: 14px 28px; font-size: 16px; font-weight: 700;
+             border: none; border-radius: 12px; background: #0FB8A9; color: #04201d; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .status { margin-top: 18px; font-weight: 600; color: #F5A623; }
+    .live { color: #0FB8A9; }
+    .err { color: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>VaakSetu Live Translation</h1>
+    <p>You're joining a call with live voice translation. Allow microphone access,
+       speak naturally, and you'll hear the other person in your language.</p>
+    <button id="join">Join Call</button>
+    <div class="status" id="status"></div>
+  </div>
+
+  <script type="module">
+    import { Room, RoomEvent } from 'https://cdn.jsdelivr.net/npm/livekit-client@2/+esm';
+
+    const params = new URLSearchParams(location.search);
+    const url = params.get('url');
+    const token = params.get('token');
+    const statusEl = document.getElementById('status');
+    const joinBtn = document.getElementById('join');
+
+    const setStatus = (text, cls = '') => { statusEl.textContent = text; statusEl.className = 'status ' + cls; };
+
+    if (!url || !token) {
+      joinBtn.disabled = true;
+      setStatus('Invalid call link. Ask the agent for a new one.', 'err');
+    }
+
+    joinBtn.onclick = async () => {
+      joinBtn.disabled = true;
+      setStatus('Connecting…');
+      try {
+        const room = new Room({ adaptiveStream: true, dynacast: true });
+
+        // Play the translator's audio (the other side, translated into your language).
+        room.on(RoomEvent.TrackSubscribed, (track) => {
+          if (track.kind === 'audio') {
+            const el = track.attach();
+            el.autoplay = true;
+            document.body.appendChild(el);
+          }
+        });
+        room.on(RoomEvent.Disconnected, () => setStatus('Call ended.', ''));
+
+        await room.connect(url, token);
+        await room.localParticipant.setMicrophoneEnabled(true); // publish mic
+        setStatus('● Connected — you can start talking', 'live');
+        joinBtn.style.display = 'none';
+      } catch (e) {
+        setStatus('Could not connect: ' + (e?.message || e), 'err');
+        joinBtn.disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>
