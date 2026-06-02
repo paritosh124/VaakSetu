@@ -54,13 +54,28 @@
           if (track.kind === 'audio') {
             const el = track.attach();
             el.autoplay = true;
+            el.playsInline = true;
             document.body.appendChild(el);
+            el.play?.().catch(() => {});
           }
         });
         room.on(RoomEvent.Disconnected, () => setStatus('Call ended.', ''));
 
+        // Mobile browsers block remote audio until it's unlocked by a gesture.
+        // If playback gets blocked, show a tap-to-enable prompt.
+        room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+          if (!room.canPlaybackAudio) {
+            setStatus('Tap "Enable sound" to hear the translation', 'err');
+            joinBtn.textContent = 'Enable sound';
+            joinBtn.style.display = 'inline-block';
+            joinBtn.disabled = false;
+            joinBtn.onclick = async () => { await room.startAudio(); setStatus('● Connected — you can start talking', 'live'); joinBtn.style.display = 'none'; };
+          }
+        });
+
         await room.connect(url, token);
         await room.localParticipant.setMicrophoneEnabled(true); // publish mic
+        await room.startAudio(); // unlock playback within this tap gesture
         setStatus('● Connected — you can start talking', 'live');
         joinBtn.style.display = 'none';
       } catch (e) {
