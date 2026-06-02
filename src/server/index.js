@@ -10,6 +10,18 @@ import { createSession, getSession, endSession, activeSessionCount } from './ses
 import { attachAgentSocket, startCustomerRoom } from './bot-relay.js';
 
 const app = express();
+
+// ─── CORS ──────────────────────────────────────────────────────────────────────
+// The webapp (vaak-setu.vercel.app) calls /health (wake) and the relay registers
+// sessions from Vercel. Allow cross-origin so the browser can read the response.
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-relay-secret');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
 app.use(express.json({ limit: '2mb' }));
 
 // ─── Health / wake endpoint ───────────────────────────────────────────────────
